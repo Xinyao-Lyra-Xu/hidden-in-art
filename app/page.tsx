@@ -1,65 +1,198 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
+import { Upload } from "lucide-react";
+import CanvasRenderer from "@/components/CanvasRenderer";
+import { loadImageFromFile } from "@/lib/image/loadImage";
+import { sampleImagePoints } from "@/lib/image/samplePoints";
+import type { ArtPoint, RenderMode, RenderSettings } from "@/types/art";
 
 export default function Home() {
+  const [points, setPoints] = useState<ArtPoint[]>([]);
+  const [fileName, setFileName] = useState("");
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const [settings, setSettings] = useState<RenderSettings>({
+    mode: "thread-memory",
+    pointDensity: 1200,
+    abstraction: 55,
+    paletteSize: 24,
+    showThreads: true,
+  });
+
+  async function handleFile(file: File) {
+    try {
+      setIsProcessing(true);
+      setFileName(file.name);
+
+      const image = await loadImageFromFile(file);
+      const sampled = sampleImagePoints(image, settings);
+
+      setPoints(sampled);
+    } catch (error) {
+      console.error(error);
+      alert("Failed to process image.");
+    } finally {
+      setIsProcessing(false);
+    }
+  }
+
+  function regenerate() {
+    const input = document.getElementById(
+      "image-input"
+    ) as HTMLInputElement | null;
+
+    const file = input?.files?.[0];
+
+    if (file) {
+      handleFile(file);
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main className="min-h-screen bg-[#f8f5ee] text-neutral-900">
+      <section className="mx-auto flex max-w-6xl flex-col gap-10 px-6 py-12">
+        <header className="text-center">
+          <p className="mb-3 text-xs uppercase tracking-[0.35em] text-neutral-500">
+            Machine Memory Study
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+          <h1 className="font-serif text-5xl tracking-tight md:text-7xl">
+            Hidden in Art
+          </h1>
+
+          <p className="mx-auto mt-5 max-w-2xl text-base leading-7 text-neutral-600">
+            Upload a photograph. Lose the details. Keep the memory.
+          </p>
+        </header>
+
+        <div className="mx-auto w-full max-w-2xl rounded-3xl border border-neutral-200 bg-white/60 p-6 shadow-sm backdrop-blur">
+          <label
+            htmlFor="image-input"
+            className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-neutral-300 px-6 py-10 text-center transition hover:bg-white/70"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+            <Upload className="mb-4 h-8 w-8 text-neutral-500" />
+
+            <span className="text-sm text-neutral-700">
+              Drop or select an image
+            </span>
+
+            <span className="mt-2 text-xs text-neutral-400">
+              JPG, PNG, WEBP
+            </span>
+
+            <input
+              id="image-input"
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFile(file);
+              }}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+          </label>
+
+          {fileName && (
+            <p className="mt-4 text-center text-xs text-neutral-500">
+              Loaded: {fileName}
+            </p>
+          )}
+
+          {isProcessing && (
+            <p className="mt-3 text-center text-sm text-neutral-600">
+              Reconstructing memory...
+            </p>
+          )}
+
+          <div className="mt-6 grid gap-5 md:grid-cols-2">
+            <label className="text-sm">
+              <span className="text-neutral-700">Mode</span>
+
+              <select
+                value={settings.mode}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    mode: e.target.value as RenderMode,
+                  }))
+                }
+                className="mt-2 w-full rounded-xl border border-neutral-300 bg-white px-3 py-2"
+              >
+                <option value="thread-memory">Thread Memory</option>
+                <option value="museum-dust">Museum Dust</option>
+                <option value="point-memory">Point Memory</option>
+                <option value="lost-portrait">Lost Portrait</option>
+              </select>
+            </label>
+
+            <label className="text-sm">
+              <span className="text-neutral-700">
+                Point Density: {settings.pointDensity}
+              </span>
+
+              <input
+                type="range"
+                min="300"
+                max="3000"
+                step="100"
+                value={settings.pointDensity}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    pointDensity: Number(e.target.value),
+                  }))
+                }
+                className="mt-3 w-full"
+              />
+            </label>
+
+            <label className="text-sm">
+              <span className="text-neutral-700">
+                Abstraction: {settings.abstraction}
+              </span>
+
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={settings.abstraction}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    abstraction: Number(e.target.value),
+                  }))
+                }
+                className="mt-3 w-full"
+              />
+            </label>
+
+            <label className="flex items-center gap-3 pt-6 text-sm text-neutral-700">
+              <input
+                type="checkbox"
+                checked={settings.showThreads}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    showThreads: e.target.checked,
+                  }))
+                }
+              />
+
+              Show thread lines
+            </label>
+          </div>
+
+          <button
+            onClick={regenerate}
+            className="mt-6 w-full rounded-full bg-neutral-900 px-5 py-3 text-sm text-white transition hover:bg-neutral-700"
           >
-            Documentation
-          </a>
+            Reconstruct Memory
+          </button>
         </div>
-      </main>
-    </div>
+
+        <CanvasRenderer points={points} settings={settings} />
+      </section>
+    </main>
   );
 }
