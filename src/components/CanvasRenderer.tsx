@@ -145,11 +145,11 @@ function drawThreads(
   offsetY: number,
   width: number
 ) {
-  ctx.globalAlpha = 0.07;
+  ctx.globalAlpha = 0.045;
   ctx.strokeStyle = "rgb(40, 35, 30)";
   ctx.lineWidth = 0.6;
 
-  for (let i = 0; i < points.length; i += 4) {
+  for (let i = 0; i < points.length; i += 12) {
     const p = points[i];
     const x = p.x * scale + offsetX;
     const y = p.y * scale + offsetY;
