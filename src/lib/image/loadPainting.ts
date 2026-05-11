@@ -1,11 +1,8 @@
-import type { PaintingSource } from "@/types/art";
+import { PAINTING_SOURCES, type PaintingSource } from "@/types/art";
 
-const PAINTING_PATHS: Record<Exclude<PaintingSource, "none">, string> = {
-  "van-gogh": "/paintings/van-gogh.jpg",
-  monet: "/paintings/monet.jpg",
-  vermeer: "/paintings/vermeer.jpg",
-  klimt: "/paintings/klimt.jpg",
-};
+const PAINTING_PATHS = Object.fromEntries(
+  PAINTING_SOURCES.map((source) => [source, `/paintings/${source}.jpg`])
+) as Record<Exclude<PaintingSource, "none">, string>;
 
 export async function loadPaintingSource(
   source: PaintingSource
@@ -21,6 +18,7 @@ export async function loadPaintingSource(
       resolve(null);
     };
 
+    img.decoding = "async";
     img.src = PAINTING_PATHS[source];
   });
 }

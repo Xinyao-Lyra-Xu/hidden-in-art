@@ -18,10 +18,12 @@ function parseRgb(color: string): Rgb {
 }
 
 function blendRgb(a: Rgb, b: Rgb, amount: number): Rgb {
+  const clamped = Math.max(0, Math.min(1, amount));
+
   return {
-    r: a.r * (1 - amount) + b.r * amount,
-    g: a.g * (1 - amount) + b.g * amount,
-    b: a.b * (1 - amount) + b.b * amount,
+    r: a.r * (1 - clamped) + b.r * clamped,
+    g: a.g * (1 - clamped) + b.g * clamped,
+    b: a.b * (1 - clamped) + b.b * clamped,
   };
 }
 
@@ -65,6 +67,10 @@ function noise01(x: number, y: number): number {
   return value - Math.floor(value);
 }
 
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
 export function mapPaintingColors(
   points: ArtPoint[],
   painting: HTMLImageElement | null,
@@ -102,8 +108,8 @@ export function mapPaintingColors(
     const grainY = (noise01(point.y, point.x - index * 3) - 0.5) * 0.12;
     const driftX = Math.sin(ny * Math.PI * 2 + index * 0.015) * 0.035;
     const driftY = Math.cos(nx * Math.PI * 2 + index * 0.012) * 0.035;
-    const px = (nx + grainX + driftX) * (canvas.width - 1);
-    const py = (ny + grainY + driftY) * (canvas.height - 1);
+    const px = clamp01(nx + grainX + driftX) * (canvas.width - 1);
+    const py = clamp01(ny + grainY + driftY) * (canvas.height - 1);
     const sourceColor = point.sourceColor ?? point.color;
     const paintingColor = getPixel(imageData.data, canvas.width, canvas.height, px, py);
     const sourceRgb = parseRgb(sourceColor);

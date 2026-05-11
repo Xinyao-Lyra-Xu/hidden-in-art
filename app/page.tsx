@@ -20,7 +20,7 @@ export default function Home() {
   const [sourcePoints, setSourcePoints] = useState<ArtPoint[]>([]);
   const [fileName, setFileName] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
-  const [paintingWarning, setPaintingWarning] = useState("");
+  const [paintingStatus, setPaintingStatus] = useState("Painting disabled");
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [settings, setSettings] = useState<RenderSettings>({
@@ -42,16 +42,17 @@ export default function Home() {
   }, [previewUrl]);
 
   useEffect(() => {
-    if (sourcePoints.length === 0) return;
-
     let isCurrent = true;
 
     async function remapPaintingPoints() {
       const painting = await loadPaintingSource(settings.paintingSource);
       if (!isCurrent) return;
 
-      setPaintingWarning(getPaintingWarning(painting, settings));
-      setPoints(mapPaintingColors(sourcePoints, painting, settings));
+      setPaintingStatus(getPaintingStatus(painting, settings));
+
+      if (sourcePoints.length > 0) {
+        setPoints(mapPaintingColors(sourcePoints, painting, settings));
+      }
     }
 
     remapPaintingPoints();
@@ -75,7 +76,7 @@ export default function Home() {
       const painting = await loadPaintingSource(settings.paintingSource);
       const mapped = mapPaintingColors(sampled, painting, settings);
 
-      setPaintingWarning(getPaintingWarning(painting, settings));
+      setPaintingStatus(getPaintingStatus(painting, settings));
       setSourcePoints(sampled);
       setPoints(mapped);
     } catch (error) {
@@ -167,11 +168,9 @@ export default function Home() {
             </p>
           )}
 
-          {paintingWarning && (
-            <p className="mt-3 text-center text-xs text-neutral-500">
-              {paintingWarning}
-            </p>
-          )}
+          <p className="mt-3 text-center text-xs text-neutral-500">
+            {paintingStatus}
+          </p>
 
           <div className="mt-6 grid gap-5 md:grid-cols-2">
             <label className="text-sm">
@@ -350,15 +349,15 @@ export default function Home() {
   );
 }
 
-function getPaintingWarning(
+function getPaintingStatus(
   painting: HTMLImageElement | null,
   settings: RenderSettings
 ) {
   if (!settings.usePaintingFragment || settings.paintingSource === "none") {
-    return "";
+    return "Painting disabled";
   }
 
-  if (painting) return "";
+  if (painting) return "Painting loaded";
 
-  return "Painting reference missing; using original image colors.";
+  return "Painting missing, using original colors";
 }

@@ -72,16 +72,29 @@ export default function CanvasRenderer({ points, settings }: Props) {
     function animate() {
       const nextCount = Math.min(renderPoints.length, drawnCount + batchSize);
 
-      for (let i = drawnCount; i < nextCount; i++) {
-        drawPoint(
+      if (isPainting) {
+        drawPaintingFragmentPass(
           renderCtx,
-          renderPoints[i],
-          i,
+          renderPoints,
+          drawnCount,
+          nextCount,
           scale,
           offsetX,
           offsetY,
           settings
         );
+      } else {
+        for (let i = drawnCount; i < nextCount; i++) {
+          drawPoint(
+            renderCtx,
+            renderPoints[i],
+            i,
+            scale,
+            offsetX,
+            offsetY,
+            settings
+          );
+        }
       }
 
       drawnCount = nextCount;
@@ -237,16 +250,7 @@ function drawPoint(
   if (noise < decay * 0.28 * (1 - Math.min(point.alpha, 0.85))) return;
 
   if (isPaintingFragmentActive(settings)) {
-    drawPaintingStroke(
-      ctx,
-      point,
-      index,
-      x,
-      y,
-      baseRadius,
-      noise,
-      settings
-    );
+    drawPaintingFragment(ctx, point, index, scale, offsetX, offsetY, settings);
     return;
   }
 
@@ -328,112 +332,276 @@ function getVisiblePoints(points: ArtPoint[], settings: RenderSettings) {
 
   return points.filter((point, index) => {
     const importance = Math.min(point.importance ?? point.alpha * point.r, 1);
-    const dropout = decay * 0.34 * (1 - importance * 0.65);
+    const paintingDropout = isPaintingFragmentActive(settings) ? 0.28 : 0;
+    const dropout = decay * (0.34 + paintingDropout) * (1 - importance * 0.72);
     return noise01(point.x + index, point.y - index) > dropout;
   });
 }
 
-function drawPaintingStroke(
+function drawPaintingFragmentPass(
+  ctx: CanvasRenderingContext2D,
+  points: ArtPoint[],
+  start: number,
+  end: number,
+  scale: number,
+  offsetX: number,
+  offsetY: number,
+  settings: RenderSettings
+) {
+  for (let i = start; i < end; i++) {
+    drawPaintingFragment(ctx, points[i], i, scale, offsetX, offsetY, settings);
+  }
+}
+
+function drawPaintingFragment(
   ctx: CanvasRenderingContext2D,
   point: ArtPoint,
   index: number,
+  scale: number,
+  offsetX: number,
+  offsetY: number,
+  settings: RenderSettings
+) {
+  const decay = settings.memoryDecay / 100;
+  const colorBlend = settings.colorBlend / 100;
+  const importance = Math.min(point.importance ?? point.alpha, 1);
+  const x = point.x * scale + offsetX;
+  const y = point.y * scale + offsetY;
+  const baseRadius = point.r * scale;
+  const noise = noise01(point.x + index * 3, point.y - index);
+
+  if (noise < decay * 0.42 * (1 - importance)) return;
+
+  const angle =
+    (point.angle ?? 0) +
+    (noise01(point.x - index, point.y + index) - 0.5) * 0.62;
+  const fragmentColor = point.paintingColor ?? point.color;
+  const bodyColor = point.color;
+  const darkPigment = mixColor(fragmentColor, "rgb(34, 26, 18)", 0.18 + importance * 0.22);
+  const palePigment = mixColor(bodyColor, "rgb(246, 241, 232)", 0.16 + (1 - importance) * 0.28);
+
+  drawPaintingWash(
+    ctx,
+    x,
+    y,
+    baseRadius,
+    angle,
+    noise,
+    importance,
+    bodyColor,
+    settings
+  );
+  drawPaintingPatch(
+    ctx,
+    x,
+    y,
+    baseRadius,
+    angle,
+    noise,
+    importance,
+    bodyColor,
+    palePigment,
+    fragmentColor,
+    settings
+  );
+
+  if (importance > 0.22) {
+    drawPaintingShard(
+      ctx,
+      x,
+      y,
+      baseRadius,
+      angle,
+      noise,
+      importance,
+      fragmentColor,
+      darkPigment,
+      settings
+    );
+  }
+
+  if (importance > 0.48 && colorBlend < 0.98) {
+    drawStructureTrace(
+      ctx,
+      x,
+      y,
+      baseRadius,
+      angle,
+      point.sourceColor ?? bodyColor,
+      importance,
+      1 - colorBlend
+    );
+  }
+}
+
+function drawPaintingWash(
+  ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   baseRadius: number,
+  angle: number,
   noise: number,
+  importance: number,
+  color: string,
   settings: RenderSettings
 ) {
   const decay = settings.memoryDecay / 100;
   const abstraction = settings.abstraction / 100;
-  const importance = Math.min(point.importance ?? point.alpha, 1);
-  const angle =
-    (point.angle ?? 0) +
-    (noise01(point.x - index, point.y + index) - 0.5) * 0.45;
-  const length = baseRadius * (2.4 + abstraction * 1.8 + importance * 1.2);
-  const thickness = baseRadius * (0.78 + noise * 0.45 + importance * 0.28);
+  const width = baseRadius * (5.4 + abstraction * 2.2 + noise * 1.4);
+  const height = baseRadius * (2.1 + (1 - importance) * 1.7);
+  const alpha = Math.max(
+    0.018,
+    (0.052 + (1 - importance) * 0.12) * (1 - decay * 0.48)
+  );
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle + (noise - 0.5) * 0.35);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.shadowColor = "rgba(68, 51, 32, 0.08)";
+  ctx.shadowBlur = 10 + decay * 7;
+
+  drawRoughPatchPath(ctx, width, height, noise, 0.34);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawPaintingPatch(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  baseRadius: number,
+  angle: number,
+  noise: number,
+  importance: number,
+  color: string,
+  paleColor: string,
+  strokeColor: string,
+  settings: RenderSettings
+) {
+  const decay = settings.memoryDecay / 100;
+  const abstraction = settings.abstraction / 100;
+  const width = baseRadius * (2.7 + abstraction * 1.8 + importance * 1.9);
+  const height = baseRadius * (1.05 + noise * 0.7 + importance * 0.42);
   const alpha = Math.max(
     0.035,
-    point.alpha * (0.24 + importance * 0.74) * (1 - decay * 0.58)
+    (0.16 + importance * 0.42) * (1 - decay * 0.54)
   );
-  const pigmentColor = point.paintingColor ?? point.color;
-  const darkPigment = mixColor(pigmentColor, "rgb(34, 26, 18)", 0.18 + importance * 0.18);
-  const palePigment = mixColor(point.color, "rgb(246, 241, 232)", 0.22 + (1 - importance) * 0.24);
 
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(angle);
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = point.color;
-  ctx.shadowColor = "rgba(76, 57, 34, 0.12)";
-  ctx.shadowBlur = (1 - importance) * 8 + decay * 5;
+  ctx.fillStyle = color;
+  ctx.shadowColor = "rgba(72, 55, 36, 0.12)";
+  ctx.shadowBlur = (1 - importance) * 7 + decay * 4;
 
-  ctx.beginPath();
-  ctx.ellipse(0, 0, length, thickness, 0, 0, Math.PI * 2);
+  drawRoughPatchPath(ctx, width, height, noise, 0.22);
   ctx.fill();
 
-  ctx.globalAlpha = alpha * (0.18 + (1 - importance) * 0.22);
-  ctx.fillStyle = palePigment;
-  ctx.beginPath();
-  ctx.ellipse(
-    -length * 0.08,
-    thickness * 0.12,
-    length * (0.68 + noise * 0.22),
-    thickness * 0.58,
-    0,
-    0,
-    Math.PI * 2
-  );
+  ctx.globalAlpha = alpha * 0.42;
+  ctx.fillStyle = paleColor;
+  drawRoughPatchPath(ctx, width * 0.72, height * 0.52, noise + 0.3, 0.18);
   ctx.fill();
-
-  if (importance > 0.18) {
-    ctx.globalAlpha = alpha * (0.28 + importance * 0.3);
-    ctx.strokeStyle = pigmentColor;
-    ctx.lineWidth = Math.max(0.45, thickness * 0.22);
-    ctx.beginPath();
-    ctx.moveTo(-length * 0.7, -thickness * 0.12);
-    ctx.quadraticCurveTo(0, thickness * 0.24, length * 0.72, -thickness * 0.06);
-    ctx.stroke();
-
-    ctx.globalAlpha = alpha * (0.2 + importance * 0.24);
-    ctx.strokeStyle = darkPigment;
-    ctx.lineWidth = Math.max(0.35, thickness * 0.16);
-    ctx.beginPath();
-    ctx.moveTo(-length * 0.58, thickness * 0.22);
-    ctx.lineTo(length * 0.54, thickness * 0.02);
-    ctx.stroke();
-  }
-
-  if (importance > 0.42) {
-    ctx.globalAlpha = alpha * 0.18;
-    ctx.fillStyle = point.sourceColor ?? point.color;
-    ctx.beginPath();
-    ctx.ellipse(
-      length * 0.08,
-      -thickness * 0.08,
-      length * 0.42,
-      thickness * 0.42,
-      0,
-      0,
-      Math.PI * 2
-    );
-    ctx.fill();
-  }
 
   for (let i = 0; i < 3; i++) {
-    const lineNoise = noise01(point.x + i * 17, point.y - i * 13);
+    const lineNoise = noise01(x + i * 17, y - i * 13);
 
-    ctx.globalAlpha = alpha * (0.08 + importance * 0.11);
-    ctx.strokeStyle = i === 1 ? palePigment : pigmentColor;
-    ctx.lineWidth = Math.max(0.28, thickness * (0.06 + lineNoise * 0.05));
+    ctx.globalAlpha = alpha * (0.18 + importance * 0.16);
+    ctx.strokeStyle = i === 1 ? paleColor : strokeColor;
+    ctx.lineWidth = Math.max(0.28, height * (0.08 + lineNoise * 0.06));
     ctx.beginPath();
-    ctx.moveTo(-length * (0.68 - lineNoise * 0.16), thickness * (lineNoise - 0.5));
-    ctx.lineTo(length * (0.58 + lineNoise * 0.14), thickness * (0.5 - lineNoise));
+    ctx.moveTo(-width * (0.42 + lineNoise * 0.12), height * (lineNoise - 0.5));
+    ctx.lineTo(width * (0.42 + lineNoise * 0.16), height * (0.5 - lineNoise));
     ctx.stroke();
   }
 
   ctx.restore();
-  ctx.globalAlpha = 1;
-  ctx.shadowBlur = 0;
+}
+
+function drawPaintingShard(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  baseRadius: number,
+  angle: number,
+  noise: number,
+  importance: number,
+  color: string,
+  darkColor: string,
+  settings: RenderSettings
+) {
+  const decay = settings.memoryDecay / 100;
+  const width = baseRadius * (1.6 + importance * 2.2);
+  const height = baseRadius * (0.46 + importance * 0.58);
+  const alpha = Math.max(0.04, (0.22 + importance * 0.58) * (1 - decay * 0.48));
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle + (noise - 0.5) * 0.25);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.shadowColor = "rgba(48, 36, 22, 0.16)";
+  ctx.shadowBlur = Math.max(0, (1 - importance) * 5 + decay * 2);
+
+  drawRoughPatchPath(ctx, width, height, noise + 0.61, 0.12);
+  ctx.fill();
+
+  ctx.globalAlpha = alpha * 0.52;
+  ctx.strokeStyle = darkColor;
+  ctx.lineWidth = Math.max(0.32, height * 0.18);
+  ctx.beginPath();
+  ctx.moveTo(-width * 0.46, -height * 0.15);
+  ctx.lineTo(width * 0.42, height * 0.1);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawStructureTrace(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  baseRadius: number,
+  angle: number,
+  color: string,
+  importance: number,
+  amount: number
+) {
+  const width = baseRadius * (1.1 + importance * 1.3);
+  const height = baseRadius * (0.24 + importance * 0.22);
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = amount * (0.04 + importance * 0.08);
+  ctx.fillStyle = color;
+  ctx.fillRect(-width / 2, -height / 2, width, height);
+  ctx.restore();
+}
+
+function drawRoughPatchPath(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  seed: number,
+  roughness: number
+) {
+  const halfWidth = width / 2;
+  const halfHeight = height / 2;
+  const n1 = noise01(seed * 101, width);
+  const n2 = noise01(seed * 131, height);
+  const n3 = noise01(seed * 173, width + height);
+  const n4 = noise01(seed * 191, width - height);
+  const rX = width * roughness;
+  const rY = height * roughness;
+
+  ctx.beginPath();
+  ctx.moveTo(-halfWidth + (n1 - 0.5) * rX, -halfHeight + (n2 - 0.5) * rY);
+  ctx.lineTo(halfWidth + (n2 - 0.5) * rX, -halfHeight + (n3 - 0.5) * rY);
+  ctx.lineTo(halfWidth + (n3 - 0.5) * rX, halfHeight + (n4 - 0.5) * rY);
+  ctx.lineTo(-halfWidth + (n4 - 0.5) * rX, halfHeight + (n1 - 0.5) * rY);
+  ctx.closePath();
 }
 
 function drawPaperGrain(

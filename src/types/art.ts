@@ -12,6 +12,13 @@ export type PaintingSource =
   | "vermeer"
   | "klimt";
 
+export const PAINTING_SOURCES = [
+  "van-gogh",
+  "monet",
+  "vermeer",
+  "klimt",
+] as const satisfies readonly Exclude<PaintingSource, "none">[];
+
 export type ArtPoint = {
   x: number;
   y: number;
