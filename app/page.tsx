@@ -5,11 +5,19 @@ import Image from "next/image";
 import { Upload } from "lucide-react";
 import CanvasRenderer from "@/components/CanvasRenderer";
 import { loadImageFromFile } from "@/lib/image/loadImage";
+import { loadPaintingSource } from "@/lib/image/loadPainting";
+import { mapPaintingColors } from "@/lib/image/paintingMap";
 import { sampleImagePoints } from "@/lib/image/samplePoints";
-import type { ArtPoint, RenderMode, RenderSettings } from "@/types/art";
+import type {
+  ArtPoint,
+  PaintingSource,
+  RenderMode,
+  RenderSettings,
+} from "@/types/art";
 
 export default function Home() {
   const [points, setPoints] = useState<ArtPoint[]>([]);
+  const [sourcePoints, setSourcePoints] = useState<ArtPoint[]>([]);
   const [fileName, setFileName] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
@@ -21,6 +29,9 @@ export default function Home() {
     paletteSize: 24,
     showThreads: true,
     memoryDecay: 24,
+    paintingSource: "none",
+    colorBlend: 68,
+    usePaintingFragment: false,
   });
 
   useEffect(() => {
@@ -28,6 +39,25 @@ export default function Home() {
       if (previewUrl) URL.revokeObjectURL(previewUrl);
     };
   }, [previewUrl]);
+
+  useEffect(() => {
+    if (sourcePoints.length === 0) return;
+
+    let isCurrent = true;
+
+    async function remapPaintingPoints() {
+      const painting = await loadPaintingSource(settings.paintingSource);
+      if (!isCurrent) return;
+
+      setPoints(mapPaintingColors(sourcePoints, painting, settings));
+    }
+
+    remapPaintingPoints();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [sourcePoints, settings]);
 
   async function handleFile(file: File) {
     try {
@@ -40,8 +70,11 @@ export default function Home() {
 
       const image = await loadImageFromFile(file);
       const sampled = sampleImagePoints(image, settings);
+      const painting = await loadPaintingSource(settings.paintingSource);
+      const mapped = mapPaintingColors(sampled, painting, settings);
 
-      setPoints(sampled);
+      setSourcePoints(sampled);
+      setPoints(mapped);
     } catch (error) {
       console.error(error);
       alert("Failed to process image.");
@@ -149,6 +182,28 @@ export default function Home() {
                 <option value="museum-dust">Museum Dust</option>
                 <option value="point-memory">Point Memory</option>
                 <option value="lost-portrait">Lost Portrait</option>
+                <option value="painting-fragment">Painting Fragment</option>
+              </select>
+            </label>
+
+            <label className="text-sm">
+              <span className="text-neutral-700">Painting Source</span>
+
+              <select
+                value={settings.paintingSource}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    paintingSource: e.target.value as PaintingSource,
+                  }))
+                }
+                className="mt-2 w-full rounded border border-neutral-300 bg-white px-3 py-2"
+              >
+                <option value="none">None</option>
+                <option value="van-gogh">Van Gogh</option>
+                <option value="monet">Monet</option>
+                <option value="vermeer">Vermeer</option>
+                <option value="klimt">Klimt</option>
               </select>
             </label>
 
@@ -213,6 +268,26 @@ export default function Home() {
               />
             </label>
 
+            <label className="text-sm">
+              <span className="text-neutral-700">
+                Painting Blend: {settings.colorBlend}
+              </span>
+
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={settings.colorBlend}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    colorBlend: Number(e.target.value),
+                  }))
+                }
+                className="mt-3 w-full"
+              />
+            </label>
+
             <label className="flex items-center gap-3 pt-6 text-sm text-neutral-700">
               <input
                 type="checkbox"
@@ -226,6 +301,21 @@ export default function Home() {
               />
 
               Show thread lines
+            </label>
+
+            <label className="flex items-center gap-3 pt-6 text-sm text-neutral-700">
+              <input
+                type="checkbox"
+                checked={settings.usePaintingFragment}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    usePaintingFragment: e.target.checked,
+                  }))
+                }
+              />
+
+              Use painting fragment
             </label>
           </div>
 

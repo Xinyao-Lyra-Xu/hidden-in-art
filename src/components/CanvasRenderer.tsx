@@ -176,12 +176,22 @@ function drawThreads(
   settings: RenderSettings
 ) {
   const decay = settings.memoryDecay / 100;
+  const isPainting = isPaintingFragmentActive(settings);
   const threadPoints = points
     .filter((point) => point.alpha * point.r > 0.62)
-    .slice(0, Math.min(150, Math.floor(points.length * 0.18)));
+    .slice(
+      0,
+      isPainting
+        ? Math.min(36, Math.floor(points.length * 0.045))
+        : Math.min(150, Math.floor(points.length * 0.18))
+    );
 
   ctx.globalAlpha =
-    settings.mode === "thread-memory" ? 0.07 - decay * 0.025 : 0.035;
+    settings.mode === "thread-memory"
+      ? 0.07 - decay * 0.025
+      : isPainting
+        ? 0.018
+        : 0.035;
   ctx.strokeStyle =
     settings.mode === "lost-portrait" ? "rgb(102, 78, 50)" : "rgb(42, 38, 32)";
   ctx.lineWidth = settings.mode === "thread-memory" ? 0.55 : 0.4;
@@ -219,6 +229,20 @@ function drawPoint(
   const baseRadius = point.r * scale;
 
   if (noise < decay * 0.28 * (1 - Math.min(point.alpha, 0.85))) return;
+
+  if (isPaintingFragmentActive(settings)) {
+    drawPaintingStroke(
+      ctx,
+      point,
+      index,
+      x,
+      y,
+      baseRadius,
+      noise,
+      settings
+    );
+    return;
+  }
 
   const alphaMultiplier =
     settings.mode === "lost-portrait"
@@ -297,10 +321,76 @@ function getVisiblePoints(points: ArtPoint[], settings: RenderSettings) {
   const decay = settings.memoryDecay / 100;
 
   return points.filter((point, index) => {
-    const importance = Math.min(point.alpha * point.r, 1);
+    const importance = Math.min(point.importance ?? point.alpha * point.r, 1);
     const dropout = decay * 0.34 * (1 - importance * 0.65);
     return noise01(point.x + index, point.y - index) > dropout;
   });
+}
+
+function drawPaintingStroke(
+  ctx: CanvasRenderingContext2D,
+  point: ArtPoint,
+  index: number,
+  x: number,
+  y: number,
+  baseRadius: number,
+  noise: number,
+  settings: RenderSettings
+) {
+  const decay = settings.memoryDecay / 100;
+  const abstraction = settings.abstraction / 100;
+  const importance = Math.min(point.importance ?? point.alpha, 1);
+  const angle =
+    (point.angle ?? 0) +
+    (noise01(point.x - index, point.y + index) - 0.5) * 0.45;
+  const length = baseRadius * (2.4 + abstraction * 1.8 + importance * 1.2);
+  const thickness = baseRadius * (0.78 + noise * 0.45 + importance * 0.28);
+  const alpha = Math.max(
+    0.035,
+    point.alpha * (0.24 + importance * 0.74) * (1 - decay * 0.58)
+  );
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = point.color;
+  ctx.shadowColor = "rgba(76, 57, 34, 0.12)";
+  ctx.shadowBlur = (1 - importance) * 8 + decay * 5;
+
+  ctx.beginPath();
+  ctx.ellipse(0, 0, length, thickness, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (importance > 0.18) {
+    ctx.globalAlpha = alpha * 0.36;
+    ctx.strokeStyle = point.paintingColor ?? point.color;
+    ctx.lineWidth = Math.max(0.45, thickness * 0.22);
+    ctx.beginPath();
+    ctx.moveTo(-length * 0.7, -thickness * 0.12);
+    ctx.quadraticCurveTo(0, thickness * 0.24, length * 0.72, -thickness * 0.06);
+    ctx.stroke();
+  }
+
+  if (importance > 0.42) {
+    ctx.globalAlpha = alpha * 0.22;
+    ctx.fillStyle = point.sourceColor ?? point.color;
+    ctx.beginPath();
+    ctx.ellipse(
+      length * 0.08,
+      -thickness * 0.08,
+      length * 0.42,
+      thickness * 0.42,
+      0,
+      0,
+      Math.PI * 2
+    );
+    ctx.fill();
+  }
+
+  ctx.restore();
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
 }
 
 function drawPaperGrain(
@@ -381,6 +471,13 @@ function softenColor(color: string, mode: RenderSettings["mode"]) {
   return `rgb(${(r * (1 - mix) + paper.r * mix) | 0}, ${
     (g * (1 - mix) + paper.g * mix) | 0
   }, ${(b * (1 - mix) + paper.b * mix) | 0})`;
+}
+
+function isPaintingFragmentActive(settings: RenderSettings) {
+  return (
+    settings.mode === "painting-fragment" ||
+    (settings.usePaintingFragment && settings.paintingSource !== "none")
+  );
 }
 
 function noise01(x: number, y: number): number {
