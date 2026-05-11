@@ -126,6 +126,7 @@ function informationScore(
     brightness: b,
     dark,
     edge,
+    contrast,
     saturation: sat,
     score:
       (edge * 0.42 + contrast * 0.26 + dark * 0.22 + sat * 0.16 + variance * 0.1) *
@@ -205,17 +206,30 @@ export function sampleImagePoints(
         decay * 1.4 +
         noise01(bestX + 17, bestY - 11) * 0.85 -
         bestInfo.edge * 0.9;
+      const sourceColor = rgbToString(
+        bestInfo.pixel.r,
+        bestInfo.pixel.g,
+        bestInfo.pixel.b
+      );
+      const angle =
+        Math.atan2(
+          bestY - (y + cellSize / 2),
+          bestX - (x + cellSize / 2)
+        ) +
+        (noise01(bestX + 41, bestY - 23) - 0.5) * 0.9;
 
       candidates.push({
         x: Math.max(0, Math.min(canvas.width - 1, bestX + jitter)),
         y: Math.max(0, Math.min(canvas.height - 1, bestY - jitter * 0.55)),
         r: Math.max(0.8, radius),
-        color: rgbToString(bestInfo.pixel.r, bestInfo.pixel.g, bestInfo.pixel.b),
+        color: sourceColor,
         alpha: Math.min(
           0.18 + bestInfo.dark * 0.42 + bestInfo.edge * 0.38 + bestInfo.saturation * 0.12,
           0.9
         ),
+        sourceColor,
         importance: bestScore,
+        angle,
       });
     }
   }
@@ -223,5 +237,14 @@ export function sampleImagePoints(
   return candidates
     .sort((a, b) => b.importance - a.importance)
     .slice(0, targetCount)
-    .map(({ x, y, r, color, alpha }) => ({ x, y, r, color, alpha }));
+    .map(({ x, y, r, color, alpha, sourceColor, importance, angle }) => ({
+      x,
+      y,
+      r,
+      color,
+      alpha,
+      sourceColor,
+      importance,
+      angle,
+    }));
 }
