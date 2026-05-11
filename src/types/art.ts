@@ -20,8 +20,8 @@ export type ArtPoint = {
   alpha: number;
   sourceColor?: string;
   paintingColor?: string;
-  importance?: number;
-  angle?: number;
+  importance: number;
+  angle: number;
 };
 
 export type RenderSettings = {

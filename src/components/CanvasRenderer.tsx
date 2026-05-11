@@ -47,14 +47,20 @@ export default function CanvasRenderer({ points, settings }: Props) {
       CANVAS_WIDTH / 2 - (bounds.minX + bounds.width / 2) * scale;
     const offsetY =
       CANVAS_HEIGHT / 2 - (bounds.minY + bounds.height / 2) * scale;
+    const isPainting = isPaintingFragmentActive(settings);
     const visiblePoints = getVisiblePoints(points, settings);
-    const batchSize = Math.max(18, Math.ceil(visiblePoints.length / 56));
+    const renderPoints = isPainting
+      ? [...visiblePoints].sort(
+          (a, b) => (a.importance ?? 0) - (b.importance ?? 0)
+        )
+      : visiblePoints;
+    const batchSize = Math.max(18, Math.ceil(renderPoints.length / 56));
     let drawnCount = 0;
 
     if (settings.showThreads || settings.mode === "thread-memory") {
       drawThreads(
         renderCtx,
-        visiblePoints,
+        renderPoints,
         scale,
         offsetX,
         offsetY,
@@ -64,12 +70,12 @@ export default function CanvasRenderer({ points, settings }: Props) {
     }
 
     function animate() {
-      const nextCount = Math.min(visiblePoints.length, drawnCount + batchSize);
+      const nextCount = Math.min(renderPoints.length, drawnCount + batchSize);
 
       for (let i = drawnCount; i < nextCount; i++) {
         drawPoint(
           renderCtx,
-          visiblePoints[i],
+          renderPoints[i],
           i,
           scale,
           offsetX,
@@ -80,7 +86,7 @@ export default function CanvasRenderer({ points, settings }: Props) {
 
       drawnCount = nextCount;
 
-      if (drawnCount < visiblePoints.length) {
+      if (drawnCount < renderPoints.length) {
         animationRef.current = requestAnimationFrame(animate);
         return;
       }
@@ -349,6 +355,9 @@ function drawPaintingStroke(
     0.035,
     point.alpha * (0.24 + importance * 0.74) * (1 - decay * 0.58)
   );
+  const pigmentColor = point.paintingColor ?? point.color;
+  const darkPigment = mixColor(pigmentColor, "rgb(34, 26, 18)", 0.18 + importance * 0.18);
+  const palePigment = mixColor(point.color, "rgb(246, 241, 232)", 0.22 + (1 - importance) * 0.24);
 
   ctx.save();
   ctx.translate(x, y);
@@ -362,18 +371,40 @@ function drawPaintingStroke(
   ctx.ellipse(0, 0, length, thickness, 0, 0, Math.PI * 2);
   ctx.fill();
 
+  ctx.globalAlpha = alpha * (0.18 + (1 - importance) * 0.22);
+  ctx.fillStyle = palePigment;
+  ctx.beginPath();
+  ctx.ellipse(
+    -length * 0.08,
+    thickness * 0.12,
+    length * (0.68 + noise * 0.22),
+    thickness * 0.58,
+    0,
+    0,
+    Math.PI * 2
+  );
+  ctx.fill();
+
   if (importance > 0.18) {
-    ctx.globalAlpha = alpha * 0.36;
-    ctx.strokeStyle = point.paintingColor ?? point.color;
+    ctx.globalAlpha = alpha * (0.28 + importance * 0.3);
+    ctx.strokeStyle = pigmentColor;
     ctx.lineWidth = Math.max(0.45, thickness * 0.22);
     ctx.beginPath();
     ctx.moveTo(-length * 0.7, -thickness * 0.12);
     ctx.quadraticCurveTo(0, thickness * 0.24, length * 0.72, -thickness * 0.06);
     ctx.stroke();
+
+    ctx.globalAlpha = alpha * (0.2 + importance * 0.24);
+    ctx.strokeStyle = darkPigment;
+    ctx.lineWidth = Math.max(0.35, thickness * 0.16);
+    ctx.beginPath();
+    ctx.moveTo(-length * 0.58, thickness * 0.22);
+    ctx.lineTo(length * 0.54, thickness * 0.02);
+    ctx.stroke();
   }
 
   if (importance > 0.42) {
-    ctx.globalAlpha = alpha * 0.22;
+    ctx.globalAlpha = alpha * 0.18;
     ctx.fillStyle = point.sourceColor ?? point.color;
     ctx.beginPath();
     ctx.ellipse(
@@ -386,6 +417,18 @@ function drawPaintingStroke(
       Math.PI * 2
     );
     ctx.fill();
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const lineNoise = noise01(point.x + i * 17, point.y - i * 13);
+
+    ctx.globalAlpha = alpha * (0.08 + importance * 0.11);
+    ctx.strokeStyle = i === 1 ? palePigment : pigmentColor;
+    ctx.lineWidth = Math.max(0.28, thickness * (0.06 + lineNoise * 0.05));
+    ctx.beginPath();
+    ctx.moveTo(-length * (0.68 - lineNoise * 0.16), thickness * (lineNoise - 0.5));
+    ctx.lineTo(length * (0.58 + lineNoise * 0.14), thickness * (0.5 - lineNoise));
+    ctx.stroke();
   }
 
   ctx.restore();
@@ -471,6 +514,16 @@ function softenColor(color: string, mode: RenderSettings["mode"]) {
   return `rgb(${(r * (1 - mix) + paper.r * mix) | 0}, ${
     (g * (1 - mix) + paper.g * mix) | 0
   }, ${(b * (1 - mix) + paper.b * mix) | 0})`;
+}
+
+function mixColor(color: string, target: string, amount: number) {
+  const source = parseRgb(color);
+  const destination = parseRgb(target);
+  const clamped = Math.max(0, Math.min(1, amount));
+
+  return `rgb(${(source.r * (1 - clamped) + destination.r * clamped) | 0}, ${
+    (source.g * (1 - clamped) + destination.g * clamped) | 0
+  }, ${(source.b * (1 - clamped) + destination.b * clamped) | 0})`;
 }
 
 function isPaintingFragmentActive(settings: RenderSettings) {
