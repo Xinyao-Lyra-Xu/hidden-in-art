@@ -18,4 +18,5 @@ export type RenderSettings = {
   abstraction: number;
   paletteSize: number;
   showThreads: boolean;
+  memoryDecay: number;
 };
