@@ -38,19 +38,30 @@ function edgeStrength(
   x: number,
   y: number
 ): number {
+  const gradient = brightnessGradient(data, width, height, x, y);
+
+  return Math.min(
+    Math.sqrt(gradient.x * gradient.x + gradient.y * gradient.y) / 120,
+    1
+  );
+}
+
+function brightnessGradient(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number
+) {
   const left = getPixel(data, width, height, x - 1, y);
   const right = getPixel(data, width, height, x + 1, y);
   const up = getPixel(data, width, height, x, y - 1);
   const down = getPixel(data, width, height, x, y + 1);
 
-  const horizontal = Math.abs(
-    brightness(right.r, right.g, right.b) - brightness(left.r, left.g, left.b)
-  );
-  const vertical = Math.abs(
-    brightness(down.r, down.g, down.b) - brightness(up.r, up.g, up.b)
-  );
-
-  return Math.min(Math.sqrt(horizontal * horizontal + vertical * vertical) / 120, 1);
+  return {
+    x: brightness(right.r, right.g, right.b) - brightness(left.r, left.g, left.b),
+    y: brightness(down.r, down.g, down.b) - brightness(up.r, up.g, up.b),
+  };
 }
 
 function localContrast(
@@ -117,6 +128,7 @@ function informationScore(
   const edge = edgeStrength(data, width, height, x, y);
   const contrast = localContrast(data, width, height, x, y);
   const variance = colorVariance(data, width, height, x, y);
+  const gradient = brightnessGradient(data, width, height, x, y);
   const nearWhite = b > 232 && sat < 0.1;
   const lowInformation = b > 218 && sat < 0.08 && edge < 0.08 && contrast < 0.08;
   const backgroundPenalty = nearWhite ? 0.16 : lowInformation ? 0.34 : 1;
@@ -128,6 +140,7 @@ function informationScore(
     edge,
     contrast,
     saturation: sat,
+    angle: Math.atan2(gradient.y, gradient.x) + Math.PI / 2,
     score:
       (edge * 0.42 + contrast * 0.26 + dark * 0.22 + sat * 0.16 + variance * 0.1) *
       backgroundPenalty,
@@ -212,11 +225,7 @@ export function sampleImagePoints(
         bestInfo.pixel.b
       );
       const angle =
-        Math.atan2(
-          bestY - (y + cellSize / 2),
-          bestX - (x + cellSize / 2)
-        ) +
-        (noise01(bestX + 41, bestY - 23) - 0.5) * 0.9;
+        bestInfo.angle + (noise01(bestX + 41, bestY - 23) - 0.5) * 0.72;
 
       candidates.push({
         x: Math.max(0, Math.min(canvas.width - 1, bestX + jitter)),

@@ -20,6 +20,7 @@ export default function Home() {
   const [sourcePoints, setSourcePoints] = useState<ArtPoint[]>([]);
   const [fileName, setFileName] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
+  const [paintingWarning, setPaintingWarning] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [settings, setSettings] = useState<RenderSettings>({
@@ -49,6 +50,7 @@ export default function Home() {
       const painting = await loadPaintingSource(settings.paintingSource);
       if (!isCurrent) return;
 
+      setPaintingWarning(getPaintingWarning(painting, settings));
       setPoints(mapPaintingColors(sourcePoints, painting, settings));
     }
 
@@ -73,6 +75,7 @@ export default function Home() {
       const painting = await loadPaintingSource(settings.paintingSource);
       const mapped = mapPaintingColors(sampled, painting, settings);
 
+      setPaintingWarning(getPaintingWarning(painting, settings));
       setSourcePoints(sampled);
       setPoints(mapped);
     } catch (error) {
@@ -164,6 +167,12 @@ export default function Home() {
             </p>
           )}
 
+          {paintingWarning && (
+            <p className="mt-3 text-center text-xs text-neutral-500">
+              {paintingWarning}
+            </p>
+          )}
+
           <div className="mt-6 grid gap-5 md:grid-cols-2">
             <label className="text-sm">
               <span className="text-neutral-700">Mode</span>
@@ -171,10 +180,18 @@ export default function Home() {
               <select
                 value={settings.mode}
                 onChange={(e) =>
-                  setSettings((prev) => ({
-                    ...prev,
-                    mode: e.target.value as RenderMode,
-                  }))
+                  setSettings((prev) => {
+                    const mode = e.target.value as RenderMode;
+
+                    return {
+                      ...prev,
+                      mode,
+                      usePaintingFragment:
+                        mode === "painting-fragment"
+                          ? true
+                          : prev.usePaintingFragment,
+                    };
+                  })
                 }
                 className="mt-2 w-full rounded border border-neutral-300 bg-white px-3 py-2"
               >
@@ -331,4 +348,17 @@ export default function Home() {
       </section>
     </main>
   );
+}
+
+function getPaintingWarning(
+  painting: HTMLImageElement | null,
+  settings: RenderSettings
+) {
+  if (!settings.usePaintingFragment || settings.paintingSource === "none") {
+    return "";
+  }
+
+  if (painting) return "";
+
+  return "Painting reference missing; using original image colors.";
 }
