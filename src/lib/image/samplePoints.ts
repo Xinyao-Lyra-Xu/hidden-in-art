@@ -5,7 +5,7 @@ function rgbToString(r: number, g: number, b: number): string {
 }
 
 function brightness(r: number, g: number, b: number): number {
-  return (r + g + b) / 3;
+  return r * 0.299 + g * 0.587 + b * 0.114;
 }
 
 function saturation(r: number, g: number, b: number): number {
@@ -38,21 +38,104 @@ function edgeStrength(
   x: number,
   y: number
 ): number {
-  const c = getPixel(data, width, height, x, y);
-  const l = getPixel(data, width, height, x - 1, y);
-  const r = getPixel(data, width, height, x + 1, y);
-  const u = getPixel(data, width, height, x, y - 1);
-  const d = getPixel(data, width, height, x, y + 1);
+  const left = getPixel(data, width, height, x - 1, y);
+  const right = getPixel(data, width, height, x + 1, y);
+  const up = getPixel(data, width, height, x, y - 1);
+  const down = getPixel(data, width, height, x, y + 1);
 
-  const cb = brightness(c.r, c.g, c.b);
+  const horizontal = Math.abs(
+    brightness(right.r, right.g, right.b) - brightness(left.r, left.g, left.b)
+  );
+  const vertical = Math.abs(
+    brightness(down.r, down.g, down.b) - brightness(up.r, up.g, up.b)
+  );
 
-  const diff =
-    Math.abs(cb - brightness(l.r, l.g, l.b)) +
-    Math.abs(cb - brightness(r.r, r.g, r.b)) +
-    Math.abs(cb - brightness(u.r, u.g, u.b)) +
-    Math.abs(cb - brightness(d.r, d.g, d.b));
+  return Math.min(Math.sqrt(horizontal * horizontal + vertical * vertical) / 120, 1);
+}
 
-  return Math.min(diff / 180, 1);
+function localContrast(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number
+): number {
+  const center = getPixel(data, width, height, x, y);
+  const centerBrightness = brightness(center.r, center.g, center.b);
+  let diff = 0;
+  let count = 0;
+
+  for (let oy = -2; oy <= 2; oy += 2) {
+    for (let ox = -2; ox <= 2; ox += 2) {
+      if (ox === 0 && oy === 0) continue;
+
+      const p = getPixel(data, width, height, x + ox, y + oy);
+      diff += Math.abs(centerBrightness - brightness(p.r, p.g, p.b));
+      count++;
+    }
+  }
+
+  return Math.min(diff / Math.max(count * 52, 1), 1);
+}
+
+function colorVariance(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number
+): number {
+  const center = getPixel(data, width, height, x, y);
+  let diff = 0;
+  let count = 0;
+
+  for (let oy = -2; oy <= 2; oy += 4) {
+    for (let ox = -2; ox <= 2; ox += 4) {
+      const p = getPixel(data, width, height, x + ox, y + oy);
+      diff +=
+        Math.abs(center.r - p.r) +
+        Math.abs(center.g - p.g) +
+        Math.abs(center.b - p.b);
+      count++;
+    }
+  }
+
+  return Math.min(diff / Math.max(count * 190, 1), 1);
+}
+
+function informationScore(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  x: number,
+  y: number
+) {
+  const p = getPixel(data, width, height, x, y);
+  const b = brightness(p.r, p.g, p.b);
+  const dark = 1 - b / 255;
+  const sat = saturation(p.r, p.g, p.b);
+  const edge = edgeStrength(data, width, height, x, y);
+  const contrast = localContrast(data, width, height, x, y);
+  const variance = colorVariance(data, width, height, x, y);
+  const nearWhite = b > 232 && sat < 0.1;
+  const lowInformation = b > 218 && sat < 0.08 && edge < 0.08 && contrast < 0.08;
+  const backgroundPenalty = nearWhite ? 0.16 : lowInformation ? 0.34 : 1;
+
+  return {
+    pixel: p,
+    brightness: b,
+    dark,
+    edge,
+    saturation: sat,
+    score:
+      (edge * 0.42 + contrast * 0.26 + dark * 0.22 + sat * 0.16 + variance * 0.1) *
+      backgroundPenalty,
+  };
+}
+
+function noise01(x: number, y: number): number {
+  const value = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return value - Math.floor(value);
 }
 
 export function sampleImagePoints(
@@ -76,87 +159,69 @@ export function sampleImagePoints(
   const data = imageData.data;
 
   const targetCount = Math.floor(settings.pointDensity);
+  const decay = settings.memoryDecay / 100;
+  const abstraction = settings.abstraction / 100;
 
-  // pointDensity increase -> cellSize decrease -> more points, but more expensive to compute
   const cellSize = Math.max(
-    4,
+    3,
     Math.floor(Math.sqrt((canvas.width * canvas.height) / targetCount))
   );
 
-  const candidates: ArtPoint[] = [];
+  const candidates: Array<ArtPoint & { importance: number }> = [];
 
   for (let y = 0; y < canvas.height; y += cellSize) {
     for (let x = 0; x < canvas.width; x += cellSize) {
       let bestX = x;
       let bestY = y;
       let bestScore = -1;
-      let bestColor = { r: 0, g: 0, b: 0 };
+      let bestInfo = informationScore(data, canvas.width, canvas.height, x, y);
 
-      // pick 8 random points in the cell, score them, and keep the best one
-      for (let i = 0; i < 8; i++) {
-        const px = Math.min(
-          canvas.width - 1,
-          x + Math.floor(Math.random() * cellSize)
-        );
+      const step = Math.max(1, Math.floor(cellSize / 4));
+      const maxY = Math.min(canvas.height, y + cellSize);
+      const maxX = Math.min(canvas.width, x + cellSize);
 
-        const py = Math.min(
-          canvas.height - 1,
-          y + Math.floor(Math.random() * cellSize)
-        );
+      for (let py = y; py < maxY; py += step) {
+        for (let px = x; px < maxX; px += step) {
+          const info = informationScore(data, canvas.width, canvas.height, px, py);
 
-        const p = getPixel(data, canvas.width, canvas.height, px, py);
-        const b = brightness(p.r, p.g, p.b);
-        const dark = 1 - b / 255;
-        const edge = edgeStrength(data, canvas.width, canvas.height, px, py);
-        const sat = saturation(p.r, p.g, p.b);
-
-        // blank area penalty: very bright and low saturation points are likely just background, so we give them a lower score to reduce meaningless points
-        const backgroundPenalty = b > 235 && sat < 0.08 ? 0.25 : 1;
-
-        const score =
-          (dark * 0.5 + edge * 0.65 + sat * 0.25) * backgroundPenalty;
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestX = px;
-          bestY = py;
-          bestColor = { r: p.r, g: p.g, b: p.b };
+          if (info.score > bestScore) {
+            bestScore = info.score;
+            bestX = px;
+            bestY = py;
+            bestInfo = info;
+          }
         }
       }
 
-      // low score means the point is likely in a blank area, we can skip it to save points and improve overall quality
-      if (bestScore < 0.08) continue;
+      if (bestScore < 0.055 + decay * 0.065) continue;
+      if (noise01(bestX, bestY) < decay * (1 - Math.min(bestScore * 2.8, 0.86))) {
+        continue;
+      }
 
-      const b = brightness(bestColor.r, bestColor.g, bestColor.b);
-      const dark = 1 - b / 255;
-      const edge = edgeStrength(
-        data,
-        canvas.width,
-        canvas.height,
-        bestX,
-        bestY
-      );
-
-      const abstraction = settings.abstraction / 100;
-
+      const jitter = (noise01(bestY, bestX) - 0.5) * cellSize * abstraction * 0.34;
       const radius =
-        1.1 +
-        abstraction * 3.5 +
-        Math.random() * 1.4 -
-        edge * 1.2;
+        0.85 +
+        abstraction * 2.6 +
+        decay * 1.4 +
+        noise01(bestX + 17, bestY - 11) * 0.85 -
+        bestInfo.edge * 0.9;
 
       candidates.push({
-        x: bestX,
-        y: bestY,
+        x: Math.max(0, Math.min(canvas.width - 1, bestX + jitter)),
+        y: Math.max(0, Math.min(canvas.height - 1, bestY - jitter * 0.55)),
         r: Math.max(0.8, radius),
-        color: rgbToString(bestColor.r, bestColor.g, bestColor.b),
-        alpha: Math.min(0.22 + dark * 0.55 + edge * 0.45, 0.92),
+        color: rgbToString(bestInfo.pixel.r, bestInfo.pixel.g, bestInfo.pixel.b),
+        alpha: Math.min(
+          0.18 + bestInfo.dark * 0.42 + bestInfo.edge * 0.38 + bestInfo.saturation * 0.12,
+          0.9
+        ),
+        importance: bestScore,
       });
     }
   }
 
-  // ranking points by a combination of darkness and edge strength, so that important details are more likely to be included when we limit the number of points
   return candidates
-    .sort((a, b) => b.alpha * b.r - a.alpha * a.r)
-    .slice(0, targetCount);
+    .sort((a, b) => b.importance - a.importance)
+    .slice(0, targetCount)
+    .map(({ x, y, r, color, alpha }) => ({ x, y, r, color, alpha }));
 }

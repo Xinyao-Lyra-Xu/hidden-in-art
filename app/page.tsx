@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import Image from "next/image";
 import { Upload } from "lucide-react";
 import CanvasRenderer from "@/components/CanvasRenderer";
 import { loadImageFromFile } from "@/lib/image/loadImage";
@@ -10,6 +11,7 @@ import type { ArtPoint, RenderMode, RenderSettings } from "@/types/art";
 export default function Home() {
   const [points, setPoints] = useState<ArtPoint[]>([]);
   const [fileName, setFileName] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [settings, setSettings] = useState<RenderSettings>({
@@ -18,12 +20,23 @@ export default function Home() {
     abstraction: 55,
     paletteSize: 24,
     showThreads: true,
+    memoryDecay: 24,
   });
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   async function handleFile(file: File) {
     try {
       setIsProcessing(true);
       setFileName(file.name);
+      setPreviewUrl((currentUrl) => {
+        if (currentUrl) URL.revokeObjectURL(currentUrl);
+        return URL.createObjectURL(file);
+      });
 
       const image = await loadImageFromFile(file);
       const sampled = sampleImagePoints(image, settings);
@@ -66,10 +79,10 @@ export default function Home() {
           </p>
         </header>
 
-        <div className="mx-auto w-full max-w-2xl rounded-3xl border border-neutral-200 bg-white/60 p-6 shadow-sm backdrop-blur">
+        <div className="mx-auto w-full max-w-2xl rounded border border-neutral-200 bg-white/60 p-6 shadow-sm backdrop-blur">
           <label
             htmlFor="image-input"
-            className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-neutral-300 px-6 py-10 text-center transition hover:bg-white/70"
+            className="flex cursor-pointer flex-col items-center justify-center rounded border border-dashed border-neutral-300 px-6 py-10 text-center transition hover:bg-white/70"
           >
             <Upload className="mb-4 h-8 w-8 text-neutral-500" />
 
@@ -93,10 +106,23 @@ export default function Home() {
             />
           </label>
 
-          {fileName && (
-            <p className="mt-4 text-center text-xs text-neutral-500">
-              Loaded: {fileName}
-            </p>
+          {previewUrl && (
+            <figure className="mx-auto mt-5 flex max-w-[220px] flex-col items-center gap-2">
+              <div className="overflow-hidden rounded border border-neutral-200 bg-[#f6f1e8] p-1 shadow-sm">
+                <Image
+                  src={previewUrl}
+                  alt=""
+                  width={220}
+                  height={128}
+                  unoptimized
+                  className="max-h-32 w-auto object-contain grayscale-[15%]"
+                />
+              </div>
+
+              <figcaption className="max-w-full truncate text-center text-xs text-neutral-500">
+                {fileName}
+              </figcaption>
+            </figure>
           )}
 
           {isProcessing && (
@@ -117,7 +143,7 @@ export default function Home() {
                     mode: e.target.value as RenderMode,
                   }))
                 }
-                className="mt-2 w-full rounded-xl border border-neutral-300 bg-white px-3 py-2"
+                className="mt-2 w-full rounded border border-neutral-300 bg-white px-3 py-2"
               >
                 <option value="thread-memory">Thread Memory</option>
                 <option value="museum-dust">Museum Dust</option>
@@ -161,6 +187,26 @@ export default function Home() {
                   setSettings((prev) => ({
                     ...prev,
                     abstraction: Number(e.target.value),
+                  }))
+                }
+                className="mt-3 w-full"
+              />
+            </label>
+
+            <label className="text-sm">
+              <span className="text-neutral-700">
+                Memory Decay: {settings.memoryDecay}
+              </span>
+
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={settings.memoryDecay}
+                onChange={(e) =>
+                  setSettings((prev) => ({
+                    ...prev,
+                    memoryDecay: Number(e.target.value),
                   }))
                 }
                 className="mt-3 w-full"
