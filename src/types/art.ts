@@ -3,7 +3,8 @@ export type RenderMode =
   | "museum-dust"
   | "point-memory"
   | "lost-portrait"
-  | "painting-fragment";
+  | "painting-fragment"
+  | "extracted-painting-transfer";
 
 export type PaintingSource =
   | "none"
@@ -27,8 +28,35 @@ export type ArtPoint = {
   alpha: number;
   sourceColor?: string;
   paintingColor?: string;
+  patchSize?: number;
   importance: number;
   angle: number;
+};
+
+export type TransferTargetPoint = {
+  x: number;
+  y: number;
+  r: number;
+  sourceIndex: number;
+  importance: number;
+  angle: number;
+  targetColor: string;
+  targetBrightness: number;
+  targetSaturation: number;
+  targetWarmth: number;
+};
+
+export type ArtworkMetadata = {
+  id: string;
+  title: string;
+  artist: string;
+  image: string;
+  tags: string[];
+  mood: string[];
+  palette: string[];
+  complexity: number;
+  brightness: number;
+  saturation: number;
 };
 
 export type RenderSettings = {
@@ -41,4 +69,8 @@ export type RenderSettings = {
   paintingSource: PaintingSource;
   colorBlend: number;
   usePaintingFragment: boolean;
+  markerSize: number;
+  topReconstructionScale: number;
+  preserveSourceImage: boolean;
+  reconstructionOpacity: number;
 };

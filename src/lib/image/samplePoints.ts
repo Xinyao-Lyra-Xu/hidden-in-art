@@ -243,6 +243,7 @@ export function sampleImagePoints(
           0.9
         ),
         sourceColor,
+        patchSize: Math.max(8, cellSize * (1.6 + bestScore * 2.4)),
         importance: normalizeImportance(bestScore),
         angle,
       });
@@ -252,13 +253,14 @@ export function sampleImagePoints(
   return candidates
     .sort((a, b) => b.importance - a.importance)
     .slice(0, targetCount)
-    .map(({ x, y, r, color, alpha, sourceColor, importance, angle }) => ({
+    .map(({ x, y, r, color, alpha, sourceColor, patchSize, importance, angle }) => ({
       x,
       y,
       r,
       color,
       alpha,
       sourceColor,
+      patchSize,
       importance,
       angle,
     }));

@@ -1,0 +1,50 @@
+[
+  {
+    "id": "van-gogh-starry-night",
+    "title": "The Starry Night",
+    "artist": "Van Gogh",
+    "image": "/paintings/van-gogh.jpg",
+    "tags": ["landscape", "night", "swirling", "expressive", "blue", "yellow", "sky"],
+    "mood": ["dramatic", "energetic", "dreamlike"],
+    "palette": ["#1a3a5c", "#e8c020", "#2d5a2d", "#0d1f3c", "#c8a030"],
+    "complexity": 0.82,
+    "brightness": 0.35,
+    "saturation": 0.68
+  },
+  {
+    "id": "monet-water-lilies",
+    "title": "Water Lilies",
+    "artist": "Monet",
+    "image": "/paintings/monet.jpg",
+    "tags": ["landscape", "water", "soft", "impressionist", "green", "horizontal", "flowers"],
+    "mood": ["peaceful", "dreamy", "soft"],
+    "palette": ["#7aad8a", "#8ab5c8", "#d4a0c0", "#4a7a5a", "#b8d4c0"],
+    "complexity": 0.65,
+    "brightness": 0.55,
+    "saturation": 0.42
+  },
+  {
+    "id": "vermeer-pearl-earring",
+    "title": "Girl with a Pearl Earring",
+    "artist": "Vermeer",
+    "image": "/paintings/vermeer.jpg",
+    "tags": ["portrait", "face", "warm", "dark-background", "classical", "intimate"],
+    "mood": ["quiet", "classical", "intimate"],
+    "palette": ["#2b2a25", "#d6b26d", "#f1dfc4", "#1a1814", "#a07840"],
+    "complexity": 0.55,
+    "brightness": 0.42,
+    "saturation": 0.38
+  },
+  {
+    "id": "klimt-the-kiss",
+    "title": "The Kiss",
+    "artist": "Klimt",
+    "image": "/paintings/klimt.jpg",
+    "tags": ["portrait", "decorative", "gold", "pattern", "ornate", "warm", "couple"],
+    "mood": ["romantic", "opulent", "rich"],
+    "palette": ["#c8a43c", "#2c2416", "#8b6914", "#e8c870", "#1a160e"],
+    "complexity": 0.88,
+    "brightness": 0.48,
+    "saturation": 0.58
+  }
+]
