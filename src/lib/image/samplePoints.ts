@@ -152,6 +152,10 @@ function noise01(x: number, y: number): number {
   return value - Math.floor(value);
 }
 
+function normalizeImportance(score: number): number {
+  return Math.max(0, Math.min(1, score));
+}
+
 export function sampleImagePoints(
   image: HTMLImageElement,
   settings: RenderSettings
@@ -225,7 +229,9 @@ export function sampleImagePoints(
         bestInfo.pixel.b
       );
       const angle =
-        bestInfo.angle + (noise01(bestX + 41, bestY - 23) - 0.5) * 0.72;
+        Number.isFinite(bestInfo.angle)
+          ? bestInfo.angle + (noise01(bestX + 41, bestY - 23) - 0.5) * 0.72
+          : (noise01(bestX + 41, bestY - 23) - 0.5) * Math.PI;
 
       candidates.push({
         x: Math.max(0, Math.min(canvas.width - 1, bestX + jitter)),
@@ -237,7 +243,8 @@ export function sampleImagePoints(
           0.9
         ),
         sourceColor,
-        importance: bestScore,
+        patchSize: Math.max(8, cellSize * (1.6 + bestScore * 2.4)),
+        importance: normalizeImportance(bestScore),
         angle,
       });
     }
@@ -246,13 +253,14 @@ export function sampleImagePoints(
   return candidates
     .sort((a, b) => b.importance - a.importance)
     .slice(0, targetCount)
-    .map(({ x, y, r, color, alpha, sourceColor, importance, angle }) => ({
+    .map(({ x, y, r, color, alpha, sourceColor, patchSize, importance, angle }) => ({
       x,
       y,
       r,
       color,
       alpha,
       sourceColor,
+      patchSize,
       importance,
       angle,
     }));
