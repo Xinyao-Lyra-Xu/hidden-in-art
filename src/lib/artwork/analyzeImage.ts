@@ -1,11 +1,12 @@
 export type ImageAnalysis = {
-  dominantColors: string[];
-  avgBrightness: number;
-  avgSaturation: number;
-  edgeDensity: number;
-  contrast: number;
-  warmth: number;
-  imageType: "portrait" | "landscape" | "abstract" | "unknown";
+  dominantColors:   string[];
+  averageBrightness: number;  // [0,1]
+  averageSaturation: number;  // [0,1]
+  edgeDensity:      number;   // [0,1] global Sobel edges
+  textureDensity:   number;   // [0,1] local luminance variance
+  contrast:         number;   // [0,1]
+  warmth:           number;   // [0,1]
+  roughType: "portrait-like" | "landscape-like" | "high-texture" | "low-texture" | "unknown";
 };
 
 function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
@@ -45,6 +46,41 @@ function getCentralVsEdgeContrast(data: Uint8ClampedArray, W: number, H: number)
   return Math.abs(centralSum / centralCount - edgeLumSum / edgeCount);
 }
 
+// Local luminance variance across an 8×8 grid of cells
+function computeTextureDensity(data: Uint8ClampedArray, W: number, H: number): number {
+  const GRID = 8;
+  const cw = Math.max(1, Math.floor(W / GRID));
+  const ch = Math.max(1, Math.floor(H / GRID));
+  let totalStdDev = 0, cells = 0;
+
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const x0 = gx * cw, y0 = gy * ch;
+      const x1 = Math.min(W, x0 + cw), y1 = Math.min(H, y0 + ch);
+      let sum = 0, cnt = 0;
+      for (let y = y0; y < y1; y++)
+        for (let x = x0; x < x1; x++) {
+          const i = (y * W + x) * 4;
+          sum += (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+          cnt++;
+        }
+      if (cnt === 0) continue;
+      const mean = sum / cnt;
+      let variance = 0;
+      for (let y = y0; y < y1; y++)
+        for (let x = x0; x < x1; x++) {
+          const i = (y * W + x) * 4;
+          const lum = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) / 255;
+          variance += (lum - mean) ** 2;
+        }
+      totalStdDev += Math.sqrt(variance / cnt);
+      cells++;
+    }
+  }
+
+  return Math.min(1, (totalStdDev / cells) / 0.18);
+}
+
 export function analyzeImage(img: HTMLImageElement): ImageAnalysis {
   const maxDim = 200;
   const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
@@ -72,15 +108,13 @@ export function analyzeImage(img: HTMLImageElement): ImageAnalysis {
     if (l < minLum) minLum = l;
     if (l > maxLum) maxLum = l;
 
-    // quantize to 32-step RGB buckets for dominant color extraction
     const br = Math.floor(r / 32) * 32;
     const bg = Math.floor(g / 32) * 32;
     const bb = Math.floor(b / 32) * 32;
-    const key = `${br},${bg},${bb}`;
-    colorBuckets.set(key, (colorBuckets.get(key) ?? 0) + 1);
+    colorBuckets.set(`${br},${bg},${bb}`, (colorBuckets.get(`${br},${bg},${bb}`) ?? 0) + 1);
   }
 
-  // Sobel edge detection sampled every 2 pixels
+  // Sobel edge density (sampled every 2 px)
   let edgeSum = 0, edgeSamples = 0;
   const lum = (x: number, y: number) => {
     const idx = (y * W + x) * 4;
@@ -99,11 +133,12 @@ export function analyzeImage(img: HTMLImageElement): ImageAnalysis {
     }
   }
 
-  const avgBrightness = totalBrightness / pixels;
-  const avgSaturation = totalSaturation / pixels;
+  const averageBrightness = totalBrightness / pixels;
+  const averageSaturation = totalSaturation / pixels;
   const warmth = Math.max(0, Math.min(1, (totalWarmth / pixels + 1) / 2));
   const edgeDensity = Math.min(1, (edgeSum / edgeSamples) / 0.45);
   const contrast = maxLum - minLum;
+  const textureDensity = computeTextureDensity(data, W, H);
 
   const dominantColors = [...colorBuckets.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -116,16 +151,18 @@ export function analyzeImage(img: HTMLImageElement): ImageAnalysis {
   const aspectRatio = img.naturalWidth / img.naturalHeight;
   const centralContrast = getCentralVsEdgeContrast(data, W, H);
 
-  let imageType: ImageAnalysis["imageType"] = "unknown";
+  let roughType: ImageAnalysis["roughType"] = "unknown";
   if (edgeDensity > 0.75) {
-    imageType = "abstract";
+    roughType = "high-texture";
+  } else if (edgeDensity < 0.25 && textureDensity < 0.30) {
+    roughType = "low-texture";
   } else if (aspectRatio < 0.95 && centralContrast > 0.12) {
-    imageType = "portrait";
+    roughType = "portrait-like";
   } else if (aspectRatio > 1.5) {
-    imageType = "landscape";
+    roughType = "landscape-like";
   } else if (centralContrast > 0.15) {
-    imageType = "portrait";
+    roughType = "portrait-like";
   }
 
-  return { dominantColors, avgBrightness, avgSaturation, edgeDensity, contrast, warmth, imageType };
+  return { dominantColors, averageBrightness, averageSaturation, edgeDensity, textureDensity, contrast, warmth, roughType };
 }

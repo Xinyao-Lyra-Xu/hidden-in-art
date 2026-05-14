@@ -1,3 +1,28 @@
+export type ArtworkMetadata = {
+  id: string;
+  title: string;
+  artist: string;
+  image?: string;          // optional – Met paintings load via metId/query
+  thumbnail?: string;
+  year?: string;
+  publicDomain?: boolean;
+  category?: string;
+  tags: string[];
+  mood?: string[];
+  palette: string[];
+  brightness?: number;     // [0,1]
+  saturation?: number;     // [0,1]
+  warmth?: number;         // [0,1]
+  complexity?: number;     // [0,1]
+  edgeDensity?: number;    // [0,1]
+  reconstructability?: number; // [0,1]
+  recommendedFor?: string[];
+  source?: string;
+  sourceUrl?: string;
+  metId?: number;          // Met Museum object ID (0 = unknown, use query)
+  query?: string;          // search string for Met API fallback
+};
+
 export type RenderSettings = {
   patchCount: number;      // 40–200, default 100
   targetPainting: string;

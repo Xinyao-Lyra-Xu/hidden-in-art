@@ -1,52 +1,48 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { RenderSettings } from "@/types/art";
-import { MOSAIC_PAINTINGS } from "@/types/art";
+import type { ArtworkMetadata } from "@/types/art";
 
 // ── Layout constants ──────────────────────────────────────────────────────────
-const CANVAS_W     = 900;
-const TOP_PAD      = 52;
-const RECON_FRAC   = 0.25;   // reconstruction width as fraction of CANVAS_W (~225 px)
-const THREAD_GAP   = 80;
-const SOURCE_MAX_H = 560;
-const BOTTOM_PAD   = 28;
-const MAX_PX       = 800;
-const DOT_R        = 4.5;
-const FOCAL_GRID   = 20;     // candidates inside focal region: 20×20 = 400
-const FOCAL_SCAN   = 10;     // saliency scan grid size
-const FOCAL_FRAC   = 0.40;   // focal region size as fraction of painting
+const CANVAS_W    = 900;
+const TOP_PAD     = 52;
+const RECON_FRAC  = 0.55;   // reconstruction width ~495 px
+const THREAD_GAP  = 80;
+const USER_MAX_H  = 480;
+const BOTTOM_PAD  = 28;
+const MAX_PX      = 900;
+const FOCAL_SCAN  = 20;     // 20×20 saliency scan
+const FOCAL_FRAC  = 0.30;   // focal crop: 30% of painting dimension per axis (~9% area)
+const COLOR_GRID  = 64;     // 64×64 = 4096 color candidates from user photo
+const MAX_THREADS = 120;    // max connecting lines drawn
+const DOT_R_USER  = 2;      // radius of sampling markers on user photo
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PaintData = {
-  pixels:    Uint8ClampedArray;
-  w:         number;
-  h:         number;
-  srcCanvas: HTMLCanvasElement;
-  srcImg:    HTMLImageElement;
-};
-
-type Match = {
-  srcNx: number;  // normalized x in painting [0,1]
-  srcNy: number;
-  tgtNx: number;  // normalized x in reconstruction [0,1]
-  tgtNy: number;
+  pixels: Uint8ClampedArray;
+  w:      number;
+  h:      number;
 };
 
 type FocalBox = { nx0: number; ny0: number; nx1: number; ny1: number };
 
-// Maps normalized painting coords to canvas screen coords (accounts for center-crop).
-type PaintXform = {
-  visNx0: number; visNy0: number;
-  visNW:  number; visNH:  number;
-  screenY: number; screenH: number;
+type ColorCandidate = { nx: number; ny: number; r: number; g: number; b: number };
+
+type GridMatch = {
+  focalNx: number; focalNy: number;
+  userNx:  number; userNy:  number;
+  r: number; g: number; b: number;
 };
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
-function n01(x: number, y: number): number {
-  const v = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
-  return v - Math.floor(v);
+// Fast integer hash — replaces Math.sin-based jitter in the hot inner loop
+function fastRand(a: number, b: number): number {
+  let x = ((a * 12347 + b * 17911) ^ (a << 5)) >>> 0;
+  x ^= x >>> 16;
+  x = (x * 0x45d9f3b) >>> 0;
+  x ^= x >>> 16;
+  return x / 0xffffffff;
 }
 
 function makeOffscreen(img: HTMLImageElement, maxPx: number): HTMLCanvasElement {
@@ -76,64 +72,51 @@ function avgRgb(
     return [px[i], px[i + 1], px[i + 2]];
   }
   let r = 0, g = 0, b = 0, n = 0;
-  const sx = Math.max(1, Math.ceil((rx - lx + 1) / 5));
-  const sy = Math.max(1, Math.ceil((ry - ly + 1) / 5));
-  for (let qy = ly; qy <= ry; qy += sy) {
+  const sx = Math.max(1, Math.ceil((rx - lx + 1) / 6));
+  const sy = Math.max(1, Math.ceil((ry - ly + 1) / 6));
+  for (let qy = ly; qy <= ry; qy += sy)
     for (let qx = lx; qx <= rx; qx += sx) {
       const i = (qy * w + qx) * 4;
       r += px[i]; g += px[i + 1]; b += px[i + 2]; n++;
     }
-  }
   return n > 0 ? [r / n, g / n, b / n] : [128, 128, 128];
 }
 
-// Map a normalized painting position to screen canvas coords, correcting for center-crop.
-function paintToScreen(xf: PaintXform, nx: number, ny: number): [number, number] {
-  return [
-    ((nx - xf.visNx0) / xf.visNW) * CANVAS_W,
-    xf.screenY + ((ny - xf.visNy0) / xf.visNH) * xf.screenH,
-  ];
-}
-
 // ── Saliency detection ────────────────────────────────────────────────────────
-// Scan the inner FOCAL_SCAN×FOCAL_SCAN grid of the painting (skipping 1-cell border
-// to avoid dark frames), find the cell with maximum color variance, and return a
-// FOCAL_FRAC×FOCAL_FRAC bounding box centered on it.
+// Finds the most visually rich region; adds gentle center-bias so face/subject
+// regions score higher than equally-varied corners/backgrounds.
 
 function detectSalientRegion(px: Uint8ClampedArray, w: number, h: number): FocalBox {
   const cw = w / FOCAL_SCAN;
   const ch = h / FOCAL_SCAN;
-  let bestScore = -1;
-  let bestGx    = FOCAL_SCAN >> 1;
-  let bestGy    = FOCAL_SCAN >> 1;
+  let bestScore = -1, bestGx = FOCAL_SCAN >> 1, bestGy = FOCAL_SCAN >> 1;
 
-  // Skip outermost ring (often dark frames / blank margins)
   for (let gy = 1; gy < FOCAL_SCAN - 1; gy++) {
     for (let gx = 1; gx < FOCAL_SCAN - 1; gx++) {
       const x0 = gx * cw, y0 = gy * ch;
-      const x1 = x0 + cw,  y1 = y0 + ch;
       const stepX = Math.max(1, Math.floor(cw / 6));
       const stepY = Math.max(1, Math.floor(ch / 6));
       let mr = 0, mg = 0, mb = 0, cnt = 0;
-
-      for (let qy = Math.floor(y0); qy < Math.floor(y1); qy += stepY) {
-        for (let qx = Math.floor(x0); qx < Math.floor(x1); qx += stepX) {
+      for (let qy = Math.floor(y0); qy < Math.floor(y0 + ch); qy += stepY)
+        for (let qx = Math.floor(x0); qx < Math.floor(x0 + cw); qx += stepX) {
           const i = (Math.min(h - 1, qy) * w + Math.min(w - 1, qx)) * 4;
           mr += px[i]; mg += px[i + 1]; mb += px[i + 2]; cnt++;
         }
-      }
       if (cnt < 2) continue;
       mr /= cnt; mg /= cnt; mb /= cnt;
-
       let v = 0;
-      for (let qy = Math.floor(y0); qy < Math.floor(y1); qy += stepY) {
-        for (let qx = Math.floor(x0); qx < Math.floor(x1); qx += stepX) {
+      for (let qy = Math.floor(y0); qy < Math.floor(y0 + ch); qy += stepY)
+        for (let qx = Math.floor(x0); qx < Math.floor(x0 + cw); qx += stepX) {
           const i = (Math.min(h - 1, qy) * w + Math.min(w - 1, qx)) * 4;
           const dr = px[i] - mr, dg = px[i + 1] - mg, db = px[i + 2] - mb;
           v += dr * dr + dg * dg + db * db;
         }
-      }
-      if (v > bestScore) { bestScore = v; bestGx = gx; bestGy = gy; }
+      // Gentle center bias: cells near center of painting score slightly higher
+      const ncx = (gx + 0.5) / FOCAL_SCAN - 0.5;
+      const ncy = (gy + 0.5) / FOCAL_SCAN - 0.5;
+      const centerBonus = (1 - Math.sqrt(ncx * ncx + ncy * ncy) / 0.7) * v * 0.15;
+      const score = v + centerBonus;
+      if (score > bestScore) { bestScore = score; bestGx = gx; bestGy = gy; }
     }
   }
 
@@ -148,309 +131,196 @@ function detectSalientRegion(px: Uint8ClampedArray, w: number, h: number): Focal
   };
 }
 
-// ── Blob growth (BFS with stochastic holes) ────────────────────────────────────
-// Returns grid positions (normalized 0–1) for patches in the reconstruction.
-// Grid is 2× target count so blob fills only the center region (torn fragment look).
-
-function growBlob(
-  targetCount: number,
-  aspect: number,  // reconH / reconW
-): { positions: { nx: number; ny: number }[]; blobCols: number; blobRows: number } {
-  const blobCols = Math.max(8, Math.ceil(Math.sqrt(targetCount * 2 / aspect)));
-  const blobRows = Math.max(8, Math.ceil(targetCount * 2 / blobCols));
-
-  const seedCol = Math.floor(blobCols / 2);
-  const seedRow = Math.floor(blobRows / 2);
-  const visited = new Uint8Array(blobCols * blobRows);
-  const positions: { nx: number; ny: number }[] = [];
-  const queue: number[] = [seedCol, seedRow];
-  visited[seedRow * blobCols + seedCol] = 1;
-  let qi = 0;
-
-  const SKIP = 0.21;
-
-  while (qi < queue.length && positions.length < targetCount) {
-    const col = queue[qi++];
-    const row = queue[qi++];
-
-    // ~21% stochastic skip creates organic internal holes
-    if (n01(col * 0.71 + row * 0.37, col * 0.19 + row * 0.83) >= SKIP) {
-      positions.push({ nx: (col + 0.5) / blobCols, ny: (row + 0.5) / blobRows });
+// ── Color index ───────────────────────────────────────────────────────────────
+function buildColorIndex(
+  px: Uint8ClampedArray,
+  w: number,
+  h: number,
+): ColorCandidate[] {
+  const out: ColorCandidate[] = [];
+  for (let gy = 0; gy < COLOR_GRID; gy++)
+    for (let gx = 0; gx < COLOR_GRID; gx++) {
+      const nx  = (gx + 0.5) / COLOR_GRID;
+      const ny  = (gy + 0.5) / COLOR_GRID;
+      const ipx = Math.min(w - 1, Math.round(nx * w));
+      const ipy = Math.min(h - 1, Math.round(ny * h));
+      const i   = (ipy * w + ipx) * 4;
+      out.push({ nx, ny, r: px[i], g: px[i + 1], b: px[i + 2] });
     }
-
-    // 4-connected neighbors (skipped cells still enqueue neighbors so BFS flows around holes)
-    for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as [number, number][]) {
-      const nc = col + dc, nr = row + dr;
-      if (nc < 0 || nc >= blobCols || nr < 0 || nr >= blobRows) continue;
-      const key = nr * blobCols + nc;
-      if (!visited[key]) { visited[key] = 1; queue.push(nc, nr); }
-    }
-  }
-
-  return { positions, blobCols, blobRows };
+  return out;
 }
 
-// ── Connected-component pruning ───────────────────────────────────────────────
-// Union-find: two patches connect if their screen distance < (2r × 0.95).
-// Keeps only the largest component.
-
-function pruneToLargestComponent(
-  matches: Match[],
-  reconW: number, reconH: number,
-  patchDispR: number,
-): Match[] {
-  const n = matches.length;
-  if (n <= 1) return matches;
-
-  const parent = Array.from({ length: n }, (_, i) => i);
-  const rank   = new Int32Array(n);
-
-  function find(x: number): number {
-    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-    return x;
-  }
-
-  const distSq = (2 * patchDispR * 0.95) ** 2;
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      const dx = (matches[i].tgtNx - matches[j].tgtNx) * reconW;
-      const dy = (matches[i].tgtNy - matches[j].tgtNy) * reconH;
-      if (dx * dx + dy * dy < distSq) {
-        const ri = find(i), rj = find(j);
-        if (ri !== rj) {
-          if (rank[ri] < rank[rj]) parent[ri] = rj;
-          else if (rank[ri] > rank[rj]) parent[rj] = ri;
-          else { parent[rj] = ri; rank[ri]++; }
-        }
-      }
-    }
-  }
-
-  const compSize = new Map<number, number>();
-  for (let i = 0; i < n; i++) {
-    const r = find(i);
-    compSize.set(r, (compSize.get(r) ?? 0) + 1);
-  }
-  let bestRoot = find(0), bestSize = 0;
-  for (const [root, size] of compSize) {
-    if (size > bestSize) { bestSize = size; bestRoot = root; }
-  }
-
-  return matches.filter((_, i) => find(i) === bestRoot);
-}
-
-// ── Compute blob matches ──────────────────────────────────────────────────────
-// For each blob position in reconstruction space, find the best-matching painting
-// region within the focal box by color similarity to the user's photo.
-
-function computeBlobMatches(
-  srcPx: Uint8ClampedArray, srcW: number, srcH: number,
-  focal: FocalBox,
-  tgtPx: Uint8ClampedArray, tgtW: number, tgtH: number,
+// ── Grid matching ─────────────────────────────────────────────────────────────
+function computeGridMatches(
+  paintPx: Uint8ClampedArray,
+  paintW:  number,
+  paintH:  number,
+  focal:   FocalBox,
+  candidates: ColorCandidate[],
   patchCount: number,
-  reconAspect: number,
-): { matches: Match[]; blobCols: number; blobRows: number } {
-  const { positions, blobCols, blobRows } = growBlob(patchCount, reconAspect);
+): { matches: GridMatch[]; cols: number; rows: number } {
+  const focalW  = focal.nx1 - focal.nx0;
+  const focalH  = focal.ny1 - focal.ny0;
+  const aspect  = focalH / focalW;
+  const cols    = Math.max(4, Math.round(Math.sqrt(patchCount / aspect)));
+  const rows    = Math.max(4, Math.round(patchCount / cols));
+  const MAX_DSQ = 3 * 255 * 255;
+  const matches: GridMatch[] = [];
 
-  // Pre-sample painting candidates confined to focal region
-  type Candidate = { nx: number; ny: number; r: number; g: number; b: number };
-  const candidates: Candidate[] = [];
-  const fgW = (focal.nx1 - focal.nx0) / FOCAL_GRID;
-  const fgH = (focal.ny1 - focal.ny0) / FOCAL_GRID;
+  const cellW = focalW * paintW / cols;
+  const cellH = focalH * paintH / rows;
 
-  for (let gy = 0; gy < FOCAL_GRID; gy++) {
-    for (let gx = 0; gx < FOCAL_GRID; gx++) {
-      const nx0 = focal.nx0 + gx * fgW;
-      const ny0 = focal.ny0 + gy * fgH;
-      const [r, g, b] = avgRgb(
-        srcPx, srcW, srcH,
-        nx0 * srcW, ny0 * srcH,
-        (nx0 + fgW) * srcW, (ny0 + fgH) * srcH,
-      );
-      candidates.push({ nx: nx0 + fgW / 2, ny: ny0 + fgH / 2, r, g, b });
+  for (let gy = 0; gy < rows; gy++) {
+    for (let gx = 0; gx < cols; gx++) {
+      const fnx = (gx + 0.5) / cols;
+      const fny = (gy + 0.5) / rows;
+
+      const pnx = focal.nx0 + fnx * focalW;
+      const pny = focal.ny0 + fny * focalH;
+      const px0 = pnx * paintW - cellW / 2;
+      const py0 = pny * paintH - cellH / 2;
+      const [tr, tg, tb] = avgRgb(paintPx, paintW, paintH, px0, py0, px0 + cellW, py0 + cellH);
+
+      let bestIdx = 0, bestDist = Infinity;
+      for (let ci = 0; ci < candidates.length; ci++) {
+        const c  = candidates[ci];
+        const dr = c.r - tr, dg = c.g - tg, db = c.b - tb;
+        // Small jitter breaks ties; use fast integer hash (no Math.sin)
+        const jitter = fastRand(gx * 31 + gy, ci) * MAX_DSQ * 0.018;
+        const d = dr * dr + dg * dg + db * db + jitter;
+        if (d < bestDist) { bestDist = d; bestIdx = ci; }
+      }
+
+      const best = candidates[bestIdx];
+      matches.push({
+        focalNx: fnx, focalNy: fny,
+        userNx:  best.nx, userNy: best.ny,
+        r: best.r, g: best.g, b: best.b,
+      });
     }
   }
 
-  const MAX_DIST_SQ = 3 * 255 * 255;
-  const matches: Match[] = [];
-
-  for (let pi = 0; pi < positions.length; pi++) {
-    const pos = positions[pi];
-    const px0 = pos.nx * tgtW - 8, py0 = pos.ny * tgtH - 8;
-    const [tr, tg, tb] = avgRgb(tgtPx, tgtW, tgtH, px0, py0, px0 + 16, py0 + 16);
-
-    let bestIdx = 0, bestDist = Infinity;
-    for (let i = 0; i < candidates.length; i++) {
-      const c = candidates[i];
-      const dr = c.r - tr, dg = c.g - tg, db = c.b - tb;
-      const jitter = n01(i + pos.nx * 7.3, i * 0.13 + pos.ny * 5.1) * MAX_DIST_SQ * 0.04;
-      const dist = dr * dr + dg * dg + db * db + jitter;
-      if (dist < bestDist) { bestDist = dist; bestIdx = i; }
-    }
-
-    matches.push({
-      srcNx: candidates[bestIdx].nx,
-      srcNy: candidates[bestIdx].ny,
-      tgtNx: pos.nx,
-      tgtNy: pos.ny,
-    });
-  }
-
-  return { matches, blobCols, blobRows };
+  return { matches, cols, rows };
 }
 
 // ── Main draw routine ─────────────────────────────────────────────────────────
-
 function drawThreadArt(
   ctx:        CanvasRenderingContext2D,
+  dpr:        number,
   pd:         PaintData,
-  userCanvas: HTMLCanvasElement | null,
+  userCanvas: HTMLCanvasElement,
   patchCount: number,
 ) {
-  // --- Detect focal (iconic) region ------------------------------------------
-  const focal       = detectSalientRegion(pd.pixels, pd.w, pd.h);
-  const focalW      = focal.nx1 - focal.nx0;
-  const focalH      = focal.ny1 - focal.ny0;
-  const focalAspect = focalH / focalW;
+  const focal  = detectSalientRegion(pd.pixels, pd.w, pd.h);
+  const focalW = focal.nx1 - focal.nx0;
+  const focalH = focal.ny1 - focal.ny0;
 
-  // --- Layout ----------------------------------------------------------------
-  const paintAspect = pd.srcImg.height / pd.srcImg.width;
-  const sourceH     = Math.min(SOURCE_MAX_H, CANVAS_W * paintAspect);
-  const reconW      = Math.round(CANVAS_W * RECON_FRAC);
-  const reconH      = Math.round(reconW * focalAspect);
-  const reconX      = Math.round((CANVAS_W - reconW) / 2);
-  const reconY      = TOP_PAD;
-  const sourceY     = reconY + reconH + THREAD_GAP;
-  const canvasH     = sourceY + sourceH + BOTTOM_PAD;
+  // --- Layout (logical pixels) ------------------------------------------------
+  const reconW = Math.round(CANVAS_W * RECON_FRAC);
+  const reconH = Math.round(reconW * focalH / focalW);
+  const reconX = Math.round((CANVAS_W - reconW) / 2);
+  const reconY = TOP_PAD;
 
-  ctx.canvas.width  = CANVAS_W;
-  ctx.canvas.height = canvasH;
+  const uAspect = userCanvas.height / userCanvas.width;
+  const userH   = Math.min(USER_MAX_H, Math.round(CANVAS_W * uAspect));
+  const userY   = reconY + reconH + THREAD_GAP;
+  const canvasH = userY + userH + BOTTOM_PAD;
 
-  // --- Background ------------------------------------------------------------
+  // Retina: physical canvas = logical × dpr; CSS size = logical px
+  ctx.canvas.width        = CANVAS_W * dpr;
+  ctx.canvas.height       = canvasH  * dpr;
+  ctx.canvas.style.width  = `${CANVAS_W}px`;
+  ctx.canvas.style.height = `${canvasH}px`;
+  ctx.scale(dpr, dpr);
+
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, CANVAS_W, canvasH);
 
-  // --- Source painting (center-crop to fill 900 × sourceH) -------------------
-  const img   = pd.srcImg;
-  const scale = Math.max(CANVAS_W / img.width, sourceH / img.height);
-  const visW  = CANVAS_W / scale;
-  const visH  = sourceH  / scale;
-  const cropX = (img.width  - visW) / 2;
-  const cropY = (img.height - visH) / 2;
-  ctx.drawImage(img, cropX, cropY, visW, visH, 0, sourceY, CANVAS_W, sourceH);
+  // --- User photo (bottom, center-cropped to fill CANVAS_W × userH) ----------
+  const uScale = Math.max(CANVAS_W / userCanvas.width, userH / userCanvas.height);
+  const uVisW  = CANVAS_W / uScale;
+  const uVisH  = userH    / uScale;
+  const uCropX = (userCanvas.width  - uVisW) / 2;
+  const uCropY = (userCanvas.height - uVisH) / 2;
+  ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
 
-  // Transform to map normalized painting coords → screen, correcting for crop
-  const xf: PaintXform = {
-    visNx0:  cropX / img.width,
-    visNy0:  cropY / img.height,
-    visNW:   visW  / img.width,
-    visNH:   visH  / img.height,
-    screenY: sourceY,
-    screenH: sourceH,
-  };
+  // --- Build color index -------------------------------------------------------
+  const uCtx = userCanvas.getContext("2d")!;
+  const uPx  = uCtx.getImageData(0, 0, userCanvas.width, userCanvas.height).data;
+  const candidates = buildColorIndex(uPx, userCanvas.width, userCanvas.height);
 
-  // Dashed box on the painting showing the detected focal region
-  {
-    const [fx0, fy0] = paintToScreen(xf, focal.nx0, focal.ny0);
-    const [fx1, fy1] = paintToScreen(xf, focal.nx1, focal.ny1);
-    ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.45)";
-    ctx.lineWidth   = 1.5;
-    ctx.setLineDash([5, 4]);
-    ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
-    ctx.setLineDash([]);
-    ctx.restore();
-  }
-
-  // --- Placeholder when no photo uploaded ------------------------------------
-  if (!userCanvas) {
-    ctx.strokeStyle = "rgba(160,140,120,0.35)";
-    ctx.setLineDash([4, 5]);
-    ctx.strokeRect(reconX + 0.5, reconY + 0.5, reconW, reconH);
-    ctx.setLineDash([]);
-    ctx.fillStyle    = "#b0a494";
-    ctx.font         = "italic 12px serif";
-    ctx.textAlign    = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("Upload a photo", reconX + reconW / 2, reconY + reconH / 2);
-    return;
-  }
-
-  // --- Compute blob matches --------------------------------------------------
-  const tgtCtx = userCanvas.getContext("2d")!;
-  const tgtPx  = tgtCtx.getImageData(0, 0, userCanvas.width, userCanvas.height).data;
-
-  const { matches: rawMatches, blobCols, blobRows } = computeBlobMatches(
-    pd.pixels, pd.w, pd.h,
-    focal,
-    tgtPx, userCanvas.width, userCanvas.height,
-    patchCount,
-    reconH / reconW,
+  // --- Compute grid matches ----------------------------------------------------
+  const { matches, cols, rows } = computeGridMatches(
+    pd.pixels, pd.w, pd.h, focal, candidates, patchCount,
   );
 
-  // Patch display radius: large enough that 4-connected grid neighbors always overlap
-  const gridStepX  = reconW / blobCols;
-  const gridStepY  = reconH / blobRows;
-  const patchDispR = Math.max(4, Math.max(gridStepX, gridStepY) * 0.65);
+  // Dot radius: 56% of cell half-size → adjacent dots overlap ~12%, no white gaps
+  const cellDispW  = reconW / cols;
+  const cellDispH  = reconH / rows;
+  const patchDispR = Math.max(1.0, Math.min(cellDispW, cellDispH) * 0.56);
 
-  // Source patch radius: how many srcCanvas pixels to copy per patch
-  const patchSrcR = Math.max(8, patchDispR * pd.w * focalW / reconW);
+  // Map normalized user-photo coords → screen position in bottom photo area
+  const toScreen = (nx: number, ny: number): [number, number] => [
+    ((nx * userCanvas.width  - uCropX) / uVisW) * CANVAS_W,
+    userY + ((ny * userCanvas.height - uCropY) / uVisH) * userH,
+  ];
 
-  // --- Prune to largest connected component ----------------------------------
-  const matches = pruneToLargestComponent(rawMatches, reconW, reconH, patchDispR);
+  const inUserArea = (ux: number, uy: number) =>
+    ux >= 0 && ux <= CANVAS_W && uy >= userY && uy <= userY + userH;
 
-  // Pre-compute canvas coordinates for each match
-  type PtCoord = { sx: number; sy: number; rx: number; ry: number };
-  const ptCoords: PtCoord[] = matches.map((m) => {
-    const [sx, sy] = paintToScreen(xf, m.srcNx, m.srcNy);
-    return {
-      sx,
-      sy,
-      rx: reconX + m.tgtNx * reconW,
-      ry: reconY + m.tgtNy * reconH,
-    };
+  type Pt = { rx: number; ry: number; ux: number; uy: number };
+  const pts: Pt[] = matches.map((m) => {
+    const [ux, uy] = toScreen(m.userNx, m.userNy);
+    return { rx: reconX + m.focalNx * reconW, ry: reconY + m.focalNy * reconH, ux, uy };
   });
+
+  // --- Thread subset: evenly spaced, capped at MAX_THREADS --------------------
+  const validPts  = pts.filter((p) => inUserArea(p.ux, p.uy));
+  const threadStep = Math.max(1, Math.floor(validPts.length / MAX_THREADS));
+  const threadPts  = validPts.filter((_, i) => i % threadStep === 0).slice(0, MAX_THREADS);
 
   // --- 1. Threads (behind everything) ----------------------------------------
   ctx.save();
-  ctx.strokeStyle = "rgba(110,100,90,0.36)";
-  ctx.lineWidth   = 0.9;
-  for (const p of ptCoords) {
+  ctx.strokeStyle = "rgba(110,100,90,0.28)";
+  ctx.lineWidth   = 0.65;
+  for (const p of threadPts) {
     ctx.beginPath();
-    ctx.moveTo(p.sx, p.sy);
+    ctx.moveTo(p.ux, p.uy);
     ctx.lineTo(p.rx, p.ry);
     ctx.stroke();
   }
   ctx.restore();
 
-  // --- 2. Circular patches in the reconstruction (middle layer) ---------------
+  // --- 2. Circular patches in reconstruction (user photo fragments) -----------
   for (let i = 0; i < matches.length; i++) {
-    const m  = matches[i];
-    const p  = ptCoords[i];
-    const sx = m.srcNx * pd.w;
-    const sy = m.srcNy * pd.h;
-
+    const m = matches[i];
+    const p = pts[i];
     ctx.save();
     ctx.beginPath();
     ctx.arc(p.rx, p.ry, patchDispR, 0, Math.PI * 2);
     ctx.clip();
+    // Source radius in user-canvas pixels; 1:1 mapping shows real photo texture
+    const srcR = Math.max(1.5, patchDispR);
     ctx.drawImage(
-      pd.srcCanvas,
-      sx - patchSrcR, sy - patchSrcR, patchSrcR * 2, patchSrcR * 2,
-      p.rx - patchDispR, p.ry - patchDispR, patchDispR * 2, patchDispR * 2,
+      userCanvas,
+      m.userNx * userCanvas.width  - srcR,
+      m.userNy * userCanvas.height - srcR,
+      srcR * 2, srcR * 2,
+      p.rx - patchDispR, p.ry - patchDispR,
+      patchDispR * 2, patchDispR * 2,
     );
     ctx.restore();
   }
 
-  // --- 3. White sample dots on the source painting (top layer) ----------------
+  // --- 3. Small sampling markers on user photo (only for thread endpoints) ---
   ctx.save();
-  for (const p of ptCoords) {
+  for (const p of threadPts) {
     ctx.beginPath();
-    ctx.arc(p.sx, p.sy, DOT_R, 0, Math.PI * 2);
-    ctx.fillStyle   = "rgba(255,255,255,0.88)";
+    ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
+    ctx.fillStyle   = "rgba(255,255,255,0.85)";
     ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.16)";
-    ctx.lineWidth   = 0.7;
+    ctx.strokeStyle = "rgba(0,0,0,0.20)";
+    ctx.lineWidth   = 0.6;
     ctx.stroke();
   }
   ctx.restore();
@@ -460,24 +330,24 @@ function drawThreadArt(
 
 type Props = {
   sourceImage: HTMLImageElement | null;
-  settings:    RenderSettings;
+  artwork:     ArtworkMetadata | null;
+  patchCount:  number;
 };
 
-export default function CanvasRenderer({ sourceImage, settings }: Props) {
+export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const userCacheRef = useRef<{ src: HTMLImageElement; canvas: HTMLCanvasElement } | null>(null);
 
   const [pd,         setPd]         = useState<PaintData | null>(null);
-  const [statusLine, setStatusLine] = useState("Choose a painting above to begin");
+  const [statusLine, setStatusLine] = useState("Choose a painting to begin");
   const [isLoading,  setIsLoading]  = useState(false);
 
   useEffect(() => {
-    const meta = MOSAIC_PAINTINGS.find((p) => p.id === settings.targetPainting);
-    if (!meta) { setStatusLine("Unknown painting"); return; }
+    if (!artwork) { setPd(null); setStatusLine("Choose a painting to begin"); return; }
 
     let cancelled = false;
     setIsLoading(true);
-    setStatusLine(`Loading ${meta.title}…`);
+    setStatusLine(`Loading ${artwork.title}…`);
     setPd(null);
 
     const img = new window.Image();
@@ -486,32 +356,31 @@ export default function CanvasRenderer({ sourceImage, settings }: Props) {
       const oc   = makeOffscreen(img, MAX_PX);
       const octx = oc.getContext("2d")!;
       const id   = octx.getImageData(0, 0, oc.width, oc.height);
-      setPd({
-        pixels:    new Uint8ClampedArray(id.data),
-        w:         oc.width,
-        h:         oc.height,
-        srcCanvas: oc,
-        srcImg:    img,
-      });
-      setStatusLine(`${meta.title} — ${meta.artist}`);
+      setPd({ pixels: new Uint8ClampedArray(id.data), w: oc.width, h: oc.height });
+      setStatusLine(`${artwork.title} — ${artwork.artist}`);
       setIsLoading(false);
     };
     img.onerror = () => {
-      if (!cancelled) { setStatusLine(`Failed to load "${meta.title}"`); setIsLoading(false); }
+      if (!cancelled) { setStatusLine(`Failed to load "${artwork.title}"`); setIsLoading(false); }
     };
-    img.src = `/api/met-painting?id=${meta.metId}&q=${encodeURIComponent(meta.query)}`;
+    const q = artwork.query ?? `${artwork.title} ${artwork.artist}`;
+    img.src = `/api/met-painting?id=${artwork.metId ?? 0}&q=${encodeURIComponent(q)}`;
     return () => { cancelled = true; };
-  }, [settings.targetPainting]);
+  }, [artwork]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
 
     if (!pd) {
-      canvas.width  = CANVAS_W;
-      canvas.height = 600;
+      canvas.width        = CANVAS_W * dpr;
+      canvas.height       = 600      * dpr;
+      canvas.style.width  = `${CANVAS_W}px`;
+      canvas.style.height = "600px";
+      ctx.scale(dpr, dpr);
       ctx.fillStyle = "#f5f2ee";
       ctx.fillRect(0, 0, CANVAS_W, 600);
       ctx.fillStyle    = "#a89888";
@@ -526,15 +395,39 @@ export default function CanvasRenderer({ sourceImage, settings }: Props) {
     }
 
     if (sourceImage) {
-      if (userCacheRef.current?.src !== sourceImage) {
+      if (userCacheRef.current?.src !== sourceImage)
         userCacheRef.current = { src: sourceImage, canvas: makeOffscreen(sourceImage, MAX_PX) };
-      }
     } else {
       userCacheRef.current = null;
     }
 
-    drawThreadArt(ctx, pd, userCacheRef.current?.canvas ?? null, settings.patchCount);
-  }, [sourceImage, pd, settings.patchCount, isLoading]);
+    if (!userCacheRef.current) {
+      const reconW = Math.round(CANVAS_W * RECON_FRAC);
+      const reconH = Math.round(reconW * 0.75);
+      const reconX = Math.round((CANVAS_W - reconW) / 2);
+      const reconY = TOP_PAD;
+      const h = reconY + reconH + THREAD_GAP + 180 + BOTTOM_PAD;
+      canvas.width        = CANVAS_W * dpr;
+      canvas.height       = h        * dpr;
+      canvas.style.width  = `${CANVAS_W}px`;
+      canvas.style.height = `${h}px`;
+      ctx.scale(dpr, dpr);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, CANVAS_W, h);
+      ctx.strokeStyle = "rgba(160,140,120,0.35)";
+      ctx.setLineDash([4, 5]);
+      ctx.strokeRect(reconX + 0.5, reconY + 0.5, reconW, reconH);
+      ctx.setLineDash([]);
+      ctx.fillStyle    = "#b0a494";
+      ctx.font         = "italic 12px serif";
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("Upload a photo to see the reconstruction", reconX + reconW / 2, reconY + reconH / 2);
+      return;
+    }
+
+    drawThreadArt(ctx, dpr, pd, userCacheRef.current.canvas, patchCount);
+  }, [sourceImage, pd, patchCount, isLoading]);
 
   function handleExport() {
     const canvas = canvasRef.current;
