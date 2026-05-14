@@ -1,1561 +1,563 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import type { ArtPoint, RenderSettings, TransferTargetPoint } from "@/types/art";
+import { useEffect, useRef, useState } from "react";
+import type { RenderSettings } from "@/types/art";
+import { MOSAIC_PAINTINGS } from "@/types/art";
+
+// ── Layout constants ──────────────────────────────────────────────────────────
+const CANVAS_W     = 900;
+const TOP_PAD      = 52;
+const RECON_FRAC   = 0.25;   // reconstruction width as fraction of CANVAS_W (~225 px)
+const THREAD_GAP   = 80;
+const SOURCE_MAX_H = 560;
+const BOTTOM_PAD   = 28;
+const MAX_PX       = 800;
+const DOT_R        = 4.5;
+const FOCAL_GRID   = 20;     // candidates inside focal region: 20×20 = 400
+const FOCAL_SCAN   = 10;     // saliency scan grid size
+const FOCAL_FRAC   = 0.40;   // focal region size as fraction of painting
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+type PaintData = {
+  pixels:    Uint8ClampedArray;
+  w:         number;
+  h:         number;
+  srcCanvas: HTMLCanvasElement;
+  srcImg:    HTMLImageElement;
+};
+
+type Match = {
+  srcNx: number;  // normalized x in painting [0,1]
+  srcNy: number;
+  tgtNx: number;  // normalized x in reconstruction [0,1]
+  tgtNy: number;
+};
+
+type FocalBox = { nx0: number; ny0: number; nx1: number; ny1: number };
+
+// Maps normalized painting coords to canvas screen coords (accounts for center-crop).
+type PaintXform = {
+  visNx0: number; visNy0: number;
+  visNW:  number; visNH:  number;
+  screenY: number; screenH: number;
+};
+
+// ── Pure helpers ──────────────────────────────────────────────────────────────
+
+function n01(x: number, y: number): number {
+  const v = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return v - Math.floor(v);
+}
+
+function makeOffscreen(img: HTMLImageElement, maxPx: number): HTMLCanvasElement {
+  const s = Math.min(maxPx / img.width, maxPx / img.height, 1);
+  const c = document.createElement("canvas");
+  c.width  = Math.round(img.width  * s);
+  c.height = Math.round(img.height * s);
+  c.getContext("2d", { willReadFrequently: true })!
+   .drawImage(img, 0, 0, c.width, c.height);
+  return c;
+}
+
+function avgRgb(
+  px: Uint8ClampedArray,
+  w: number, h: number,
+  x0: number, y0: number,
+  x1: number, y1: number,
+): [number, number, number] {
+  const lx = Math.max(0, Math.floor(x0));
+  const ly = Math.max(0, Math.floor(y0));
+  const rx = Math.min(w - 1, Math.ceil(x1) - 1);
+  const ry = Math.min(h - 1, Math.ceil(y1) - 1);
+  if (lx > rx || ly > ry) {
+    const cx = Math.max(0, Math.min(w - 1, Math.round((x0 + x1) / 2)));
+    const cy = Math.max(0, Math.min(h - 1, Math.round((y0 + y1) / 2)));
+    const i  = (cy * w + cx) * 4;
+    return [px[i], px[i + 1], px[i + 2]];
+  }
+  let r = 0, g = 0, b = 0, n = 0;
+  const sx = Math.max(1, Math.ceil((rx - lx + 1) / 5));
+  const sy = Math.max(1, Math.ceil((ry - ly + 1) / 5));
+  for (let qy = ly; qy <= ry; qy += sy) {
+    for (let qx = lx; qx <= rx; qx += sx) {
+      const i = (qy * w + qx) * 4;
+      r += px[i]; g += px[i + 1]; b += px[i + 2]; n++;
+    }
+  }
+  return n > 0 ? [r / n, g / n, b / n] : [128, 128, 128];
+}
+
+// Map a normalized painting position to screen canvas coords, correcting for center-crop.
+function paintToScreen(xf: PaintXform, nx: number, ny: number): [number, number] {
+  return [
+    ((nx - xf.visNx0) / xf.visNW) * CANVAS_W,
+    xf.screenY + ((ny - xf.visNy0) / xf.visNH) * xf.screenH,
+  ];
+}
+
+// ── Saliency detection ────────────────────────────────────────────────────────
+// Scan the inner FOCAL_SCAN×FOCAL_SCAN grid of the painting (skipping 1-cell border
+// to avoid dark frames), find the cell with maximum color variance, and return a
+// FOCAL_FRAC×FOCAL_FRAC bounding box centered on it.
+
+function detectSalientRegion(px: Uint8ClampedArray, w: number, h: number): FocalBox {
+  const cw = w / FOCAL_SCAN;
+  const ch = h / FOCAL_SCAN;
+  let bestScore = -1;
+  let bestGx    = FOCAL_SCAN >> 1;
+  let bestGy    = FOCAL_SCAN >> 1;
+
+  // Skip outermost ring (often dark frames / blank margins)
+  for (let gy = 1; gy < FOCAL_SCAN - 1; gy++) {
+    for (let gx = 1; gx < FOCAL_SCAN - 1; gx++) {
+      const x0 = gx * cw, y0 = gy * ch;
+      const x1 = x0 + cw,  y1 = y0 + ch;
+      const stepX = Math.max(1, Math.floor(cw / 6));
+      const stepY = Math.max(1, Math.floor(ch / 6));
+      let mr = 0, mg = 0, mb = 0, cnt = 0;
+
+      for (let qy = Math.floor(y0); qy < Math.floor(y1); qy += stepY) {
+        for (let qx = Math.floor(x0); qx < Math.floor(x1); qx += stepX) {
+          const i = (Math.min(h - 1, qy) * w + Math.min(w - 1, qx)) * 4;
+          mr += px[i]; mg += px[i + 1]; mb += px[i + 2]; cnt++;
+        }
+      }
+      if (cnt < 2) continue;
+      mr /= cnt; mg /= cnt; mb /= cnt;
+
+      let v = 0;
+      for (let qy = Math.floor(y0); qy < Math.floor(y1); qy += stepY) {
+        for (let qx = Math.floor(x0); qx < Math.floor(x1); qx += stepX) {
+          const i = (Math.min(h - 1, qy) * w + Math.min(w - 1, qx)) * 4;
+          const dr = px[i] - mr, dg = px[i + 1] - mg, db = px[i + 2] - mb;
+          v += dr * dr + dg * dg + db * db;
+        }
+      }
+      if (v > bestScore) { bestScore = v; bestGx = gx; bestGy = gy; }
+    }
+  }
+
+  const cx   = (bestGx + 0.5) / FOCAL_SCAN;
+  const cy   = (bestGy + 0.5) / FOCAL_SCAN;
+  const half = FOCAL_FRAC / 2;
+  return {
+    nx0: Math.max(0, cx - half),
+    ny0: Math.max(0, cy - half),
+    nx1: Math.min(1, cx + half),
+    ny1: Math.min(1, cy + half),
+  };
+}
+
+// ── Blob growth (BFS with stochastic holes) ────────────────────────────────────
+// Returns grid positions (normalized 0–1) for patches in the reconstruction.
+// Grid is 2× target count so blob fills only the center region (torn fragment look).
+
+function growBlob(
+  targetCount: number,
+  aspect: number,  // reconH / reconW
+): { positions: { nx: number; ny: number }[]; blobCols: number; blobRows: number } {
+  const blobCols = Math.max(8, Math.ceil(Math.sqrt(targetCount * 2 / aspect)));
+  const blobRows = Math.max(8, Math.ceil(targetCount * 2 / blobCols));
+
+  const seedCol = Math.floor(blobCols / 2);
+  const seedRow = Math.floor(blobRows / 2);
+  const visited = new Uint8Array(blobCols * blobRows);
+  const positions: { nx: number; ny: number }[] = [];
+  const queue: number[] = [seedCol, seedRow];
+  visited[seedRow * blobCols + seedCol] = 1;
+  let qi = 0;
+
+  const SKIP = 0.21;
+
+  while (qi < queue.length && positions.length < targetCount) {
+    const col = queue[qi++];
+    const row = queue[qi++];
+
+    // ~21% stochastic skip creates organic internal holes
+    if (n01(col * 0.71 + row * 0.37, col * 0.19 + row * 0.83) >= SKIP) {
+      positions.push({ nx: (col + 0.5) / blobCols, ny: (row + 0.5) / blobRows });
+    }
+
+    // 4-connected neighbors (skipped cells still enqueue neighbors so BFS flows around holes)
+    for (const [dc, dr] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as [number, number][]) {
+      const nc = col + dc, nr = row + dr;
+      if (nc < 0 || nc >= blobCols || nr < 0 || nr >= blobRows) continue;
+      const key = nr * blobCols + nc;
+      if (!visited[key]) { visited[key] = 1; queue.push(nc, nr); }
+    }
+  }
+
+  return { positions, blobCols, blobRows };
+}
+
+// ── Connected-component pruning ───────────────────────────────────────────────
+// Union-find: two patches connect if their screen distance < (2r × 0.95).
+// Keeps only the largest component.
+
+function pruneToLargestComponent(
+  matches: Match[],
+  reconW: number, reconH: number,
+  patchDispR: number,
+): Match[] {
+  const n = matches.length;
+  if (n <= 1) return matches;
+
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const rank   = new Int32Array(n);
+
+  function find(x: number): number {
+    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
+    return x;
+  }
+
+  const distSq = (2 * patchDispR * 0.95) ** 2;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const dx = (matches[i].tgtNx - matches[j].tgtNx) * reconW;
+      const dy = (matches[i].tgtNy - matches[j].tgtNy) * reconH;
+      if (dx * dx + dy * dy < distSq) {
+        const ri = find(i), rj = find(j);
+        if (ri !== rj) {
+          if (rank[ri] < rank[rj]) parent[ri] = rj;
+          else if (rank[ri] > rank[rj]) parent[rj] = ri;
+          else { parent[rj] = ri; rank[ri]++; }
+        }
+      }
+    }
+  }
+
+  const compSize = new Map<number, number>();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    compSize.set(r, (compSize.get(r) ?? 0) + 1);
+  }
+  let bestRoot = find(0), bestSize = 0;
+  for (const [root, size] of compSize) {
+    if (size > bestSize) { bestSize = size; bestRoot = root; }
+  }
+
+  return matches.filter((_, i) => find(i) === bestRoot);
+}
+
+// ── Compute blob matches ──────────────────────────────────────────────────────
+// For each blob position in reconstruction space, find the best-matching painting
+// region within the focal box by color similarity to the user's photo.
+
+function computeBlobMatches(
+  srcPx: Uint8ClampedArray, srcW: number, srcH: number,
+  focal: FocalBox,
+  tgtPx: Uint8ClampedArray, tgtW: number, tgtH: number,
+  patchCount: number,
+  reconAspect: number,
+): { matches: Match[]; blobCols: number; blobRows: number } {
+  const { positions, blobCols, blobRows } = growBlob(patchCount, reconAspect);
+
+  // Pre-sample painting candidates confined to focal region
+  type Candidate = { nx: number; ny: number; r: number; g: number; b: number };
+  const candidates: Candidate[] = [];
+  const fgW = (focal.nx1 - focal.nx0) / FOCAL_GRID;
+  const fgH = (focal.ny1 - focal.ny0) / FOCAL_GRID;
+
+  for (let gy = 0; gy < FOCAL_GRID; gy++) {
+    for (let gx = 0; gx < FOCAL_GRID; gx++) {
+      const nx0 = focal.nx0 + gx * fgW;
+      const ny0 = focal.ny0 + gy * fgH;
+      const [r, g, b] = avgRgb(
+        srcPx, srcW, srcH,
+        nx0 * srcW, ny0 * srcH,
+        (nx0 + fgW) * srcW, (ny0 + fgH) * srcH,
+      );
+      candidates.push({ nx: nx0 + fgW / 2, ny: ny0 + fgH / 2, r, g, b });
+    }
+  }
+
+  const MAX_DIST_SQ = 3 * 255 * 255;
+  const matches: Match[] = [];
+
+  for (let pi = 0; pi < positions.length; pi++) {
+    const pos = positions[pi];
+    const px0 = pos.nx * tgtW - 8, py0 = pos.ny * tgtH - 8;
+    const [tr, tg, tb] = avgRgb(tgtPx, tgtW, tgtH, px0, py0, px0 + 16, py0 + 16);
+
+    let bestIdx = 0, bestDist = Infinity;
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
+      const dr = c.r - tr, dg = c.g - tg, db = c.b - tb;
+      const jitter = n01(i + pos.nx * 7.3, i * 0.13 + pos.ny * 5.1) * MAX_DIST_SQ * 0.04;
+      const dist = dr * dr + dg * dg + db * db + jitter;
+      if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+    }
+
+    matches.push({
+      srcNx: candidates[bestIdx].nx,
+      srcNy: candidates[bestIdx].ny,
+      tgtNx: pos.nx,
+      tgtNy: pos.ny,
+    });
+  }
+
+  return { matches, blobCols, blobRows };
+}
+
+// ── Main draw routine ─────────────────────────────────────────────────────────
+
+function drawThreadArt(
+  ctx:        CanvasRenderingContext2D,
+  pd:         PaintData,
+  userCanvas: HTMLCanvasElement | null,
+  patchCount: number,
+) {
+  // --- Detect focal (iconic) region ------------------------------------------
+  const focal       = detectSalientRegion(pd.pixels, pd.w, pd.h);
+  const focalW      = focal.nx1 - focal.nx0;
+  const focalH      = focal.ny1 - focal.ny0;
+  const focalAspect = focalH / focalW;
+
+  // --- Layout ----------------------------------------------------------------
+  const paintAspect = pd.srcImg.height / pd.srcImg.width;
+  const sourceH     = Math.min(SOURCE_MAX_H, CANVAS_W * paintAspect);
+  const reconW      = Math.round(CANVAS_W * RECON_FRAC);
+  const reconH      = Math.round(reconW * focalAspect);
+  const reconX      = Math.round((CANVAS_W - reconW) / 2);
+  const reconY      = TOP_PAD;
+  const sourceY     = reconY + reconH + THREAD_GAP;
+  const canvasH     = sourceY + sourceH + BOTTOM_PAD;
+
+  ctx.canvas.width  = CANVAS_W;
+  ctx.canvas.height = canvasH;
+
+  // --- Background ------------------------------------------------------------
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, CANVAS_W, canvasH);
+
+  // --- Source painting (center-crop to fill 900 × sourceH) -------------------
+  const img   = pd.srcImg;
+  const scale = Math.max(CANVAS_W / img.width, sourceH / img.height);
+  const visW  = CANVAS_W / scale;
+  const visH  = sourceH  / scale;
+  const cropX = (img.width  - visW) / 2;
+  const cropY = (img.height - visH) / 2;
+  ctx.drawImage(img, cropX, cropY, visW, visH, 0, sourceY, CANVAS_W, sourceH);
+
+  // Transform to map normalized painting coords → screen, correcting for crop
+  const xf: PaintXform = {
+    visNx0:  cropX / img.width,
+    visNy0:  cropY / img.height,
+    visNW:   visW  / img.width,
+    visNH:   visH  / img.height,
+    screenY: sourceY,
+    screenH: sourceH,
+  };
+
+  // Dashed box on the painting showing the detected focal region
+  {
+    const [fx0, fy0] = paintToScreen(xf, focal.nx0, focal.ny0);
+    const [fx1, fy1] = paintToScreen(xf, focal.nx1, focal.ny1);
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.45)";
+    ctx.lineWidth   = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(fx0, fy0, fx1 - fx0, fy1 - fy0);
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  // --- Placeholder when no photo uploaded ------------------------------------
+  if (!userCanvas) {
+    ctx.strokeStyle = "rgba(160,140,120,0.35)";
+    ctx.setLineDash([4, 5]);
+    ctx.strokeRect(reconX + 0.5, reconY + 0.5, reconW, reconH);
+    ctx.setLineDash([]);
+    ctx.fillStyle    = "#b0a494";
+    ctx.font         = "italic 12px serif";
+    ctx.textAlign    = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("Upload a photo", reconX + reconW / 2, reconY + reconH / 2);
+    return;
+  }
+
+  // --- Compute blob matches --------------------------------------------------
+  const tgtCtx = userCanvas.getContext("2d")!;
+  const tgtPx  = tgtCtx.getImageData(0, 0, userCanvas.width, userCanvas.height).data;
+
+  const { matches: rawMatches, blobCols, blobRows } = computeBlobMatches(
+    pd.pixels, pd.w, pd.h,
+    focal,
+    tgtPx, userCanvas.width, userCanvas.height,
+    patchCount,
+    reconH / reconW,
+  );
+
+  // Patch display radius: large enough that 4-connected grid neighbors always overlap
+  const gridStepX  = reconW / blobCols;
+  const gridStepY  = reconH / blobRows;
+  const patchDispR = Math.max(4, Math.max(gridStepX, gridStepY) * 0.65);
+
+  // Source patch radius: how many srcCanvas pixels to copy per patch
+  const patchSrcR = Math.max(8, patchDispR * pd.w * focalW / reconW);
+
+  // --- Prune to largest connected component ----------------------------------
+  const matches = pruneToLargestComponent(rawMatches, reconW, reconH, patchDispR);
+
+  // Pre-compute canvas coordinates for each match
+  type PtCoord = { sx: number; sy: number; rx: number; ry: number };
+  const ptCoords: PtCoord[] = matches.map((m) => {
+    const [sx, sy] = paintToScreen(xf, m.srcNx, m.srcNy);
+    return {
+      sx,
+      sy,
+      rx: reconX + m.tgtNx * reconW,
+      ry: reconY + m.tgtNy * reconH,
+    };
+  });
+
+  // --- 1. Threads (behind everything) ----------------------------------------
+  ctx.save();
+  ctx.strokeStyle = "rgba(110,100,90,0.36)";
+  ctx.lineWidth   = 0.9;
+  for (const p of ptCoords) {
+    ctx.beginPath();
+    ctx.moveTo(p.sx, p.sy);
+    ctx.lineTo(p.rx, p.ry);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // --- 2. Circular patches in the reconstruction (middle layer) ---------------
+  for (let i = 0; i < matches.length; i++) {
+    const m  = matches[i];
+    const p  = ptCoords[i];
+    const sx = m.srcNx * pd.w;
+    const sy = m.srcNy * pd.h;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(p.rx, p.ry, patchDispR, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(
+      pd.srcCanvas,
+      sx - patchSrcR, sy - patchSrcR, patchSrcR * 2, patchSrcR * 2,
+      p.rx - patchDispR, p.ry - patchDispR, patchDispR * 2, patchDispR * 2,
+    );
+    ctx.restore();
+  }
+
+  // --- 3. White sample dots on the source painting (top layer) ----------------
+  ctx.save();
+  for (const p of ptCoords) {
+    ctx.beginPath();
+    ctx.arc(p.sx, p.sy, DOT_R, 0, Math.PI * 2);
+    ctx.fillStyle   = "rgba(255,255,255,0.88)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.16)";
+    ctx.lineWidth   = 0.7;
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ── React component ───────────────────────────────────────────────────────────
 
 type Props = {
-  points: ArtPoint[];
-  settings: RenderSettings;
-  sourceImage?: HTMLImageElement | null;
-  targetImage?: HTMLImageElement | null;
-  transferTargets?: TransferTargetPoint[];
-  isAnimating?: boolean;
-  onAnimationComplete?: () => void;
+  sourceImage: HTMLImageElement | null;
+  settings:    RenderSettings;
 };
 
-type Rect = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-};
+export default function CanvasRenderer({ sourceImage, settings }: Props) {
+  const canvasRef    = useRef<HTMLCanvasElement>(null);
+  const userCacheRef = useRef<{ src: HTMLImageElement; canvas: HTMLCanvasElement } | null>(null);
 
-type Bounds = {
-  minX: number;
-  minY: number;
-  width: number;
-  height: number;
-};
-
-const CANVAS_WIDTH = 900;
-const CANVAS_HEIGHT = 700;
-
-export default function CanvasRenderer({
-  points,
-  settings,
-  sourceImage,
-  targetImage,
-  transferTargets = [],
-  isAnimating = false,
-  onAnimationComplete,
-}: Props) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const animationRef = useRef<number | null>(null);
-  const animationStateRef = useRef({
-    isAnimating: false,
-    stage: 0, // 0: markers, 1: lines, 2: patches
-  });
+  const [pd,         setPd]         = useState<PaintData | null>(null);
+  const [statusLine, setStatusLine] = useState("Choose a painting above to begin");
+  const [isLoading,  setIsLoading]  = useState(false);
 
   useEffect(() => {
-    if (isAnimating) {
-      animationStateRef.current.isAnimating = true;
-      animationStateRef.current.stage = 0;
-    }
-  }, [isAnimating]);
+    const meta = MOSAIC_PAINTINGS.find((p) => p.id === settings.targetPainting);
+    if (!meta) { setStatusLine("Unknown painting"); return; }
+
+    let cancelled = false;
+    setIsLoading(true);
+    setStatusLine(`Loading ${meta.title}…`);
+    setPd(null);
+
+    const img = new window.Image();
+    img.onload = () => {
+      if (cancelled) return;
+      const oc   = makeOffscreen(img, MAX_PX);
+      const octx = oc.getContext("2d")!;
+      const id   = octx.getImageData(0, 0, oc.width, oc.height);
+      setPd({
+        pixels:    new Uint8ClampedArray(id.data),
+        w:         oc.width,
+        h:         oc.height,
+        srcCanvas: oc,
+        srcImg:    img,
+      });
+      setStatusLine(`${meta.title} — ${meta.artist}`);
+      setIsLoading(false);
+    };
+    img.onerror = () => {
+      if (!cancelled) { setStatusLine(`Failed to load "${meta.title}"`); setIsLoading(false); }
+    };
+    img.src = `/api/met-painting?id=${meta.metId}&q=${encodeURIComponent(meta.query)}`;
+    return () => { cancelled = true; };
+  }, [settings.targetPainting]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const renderCtx = ctx;
 
-    if (animationRef.current !== null) {
-      cancelAnimationFrame(animationRef.current);
-      animationRef.current = null;
-    }
-
-    canvas.width = CANVAS_WIDTH;
-    canvas.height = CANVAS_HEIGHT;
-    drawBase(renderCtx, CANVAS_WIDTH, CANVAS_HEIGHT);
-
-    if (points.length === 0) {
-      drawEmptyState(renderCtx, CANVAS_WIDTH, CANVAS_HEIGHT);
-      drawVignette(renderCtx, CANVAS_WIDTH, CANVAS_HEIGHT);
+    if (!pd) {
+      canvas.width  = CANVAS_W;
+      canvas.height = 600;
+      ctx.fillStyle = "#f5f2ee";
+      ctx.fillRect(0, 0, CANVAS_W, 600);
+      ctx.fillStyle    = "#a89888";
+      ctx.font         = "italic 15px serif";
+      ctx.textAlign    = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        isLoading ? "Loading painting…" : "Choose a painting to begin",
+        CANVAS_W / 2, 300,
+      );
       return;
     }
 
-    const bounds = getBounds(points);
-    const scale = Math.min(
-      (CANVAS_WIDTH * 0.78) / bounds.width,
-      (CANVAS_HEIGHT * 0.78) / bounds.height
-    );
-    const offsetX =
-      CANVAS_WIDTH / 2 - (bounds.minX + bounds.width / 2) * scale;
-    const offsetY =
-      CANVAS_HEIGHT / 2 - (bounds.minY + bounds.height / 2) * scale;
-    const isTransfer = settings.mode === "extracted-painting-transfer";
-    const isPainting = isPaintingFragmentActive(settings);
-    const visiblePoints = getVisiblePoints(points, settings);
-    const renderPoints = isPainting
-      ? [...visiblePoints].sort(
-          (a, b) => (a.importance ?? 0) - (b.importance ?? 0)
-        )
-      : visiblePoints;
-    const batchSize = Math.max(18, Math.ceil(renderPoints.length / 56));
-    let drawnCount = 0;
-
-    if (isTransfer) {
-      drawExtractedPaintingTransfer(
-        renderCtx,
-        points,
-        transferTargets,
-        sourceImage ?? null,
-        targetImage ?? null,
-        settings,
-        CANVAS_WIDTH,
-        CANVAS_HEIGHT
-      );
-      drawVignette(renderCtx, CANVAS_WIDTH, CANVAS_HEIGHT);
-      renderCtx.globalAlpha = 1;
-      renderCtx.shadowBlur = 0;
-      return;
+    if (sourceImage) {
+      if (userCacheRef.current?.src !== sourceImage) {
+        userCacheRef.current = { src: sourceImage, canvas: makeOffscreen(sourceImage, MAX_PX) };
+      }
+    } else {
+      userCacheRef.current = null;
     }
 
-    if (settings.showThreads || settings.mode === "thread-memory") {
-      drawThreads(
-        renderCtx,
-        renderPoints,
-        scale,
-        offsetX,
-        offsetY,
-        CANVAS_WIDTH,
-        settings
-      );
-    }
+    drawThreadArt(ctx, pd, userCacheRef.current?.canvas ?? null, settings.patchCount);
+  }, [sourceImage, pd, settings.patchCount, isLoading]);
 
-    if (isPainting) {
-      drawPaintingFragmentMode(
-        renderCtx,
-        renderPoints,
-        settings,
-        scale,
-        offsetX,
-        offsetY,
-        CANVAS_WIDTH,
-        CANVAS_HEIGHT
-      );
-      drawVignette(renderCtx, CANVAS_WIDTH, CANVAS_HEIGHT);
-      renderCtx.globalAlpha = 1;
-      renderCtx.shadowBlur = 0;
-      return;
-    }
-
-    function animate() {
-      const nextCount = Math.min(renderPoints.length, drawnCount + batchSize);
-
-      for (let i = drawnCount; i < nextCount; i++) {
-        drawPoint(
-          renderCtx,
-          renderPoints[i],
-          i,
-          scale,
-          offsetX,
-          offsetY,
-          settings
-        );
-      }
-
-      drawnCount = nextCount;
-
-      if (drawnCount < renderPoints.length) {
-        animationRef.current = requestAnimationFrame(animate);
-        return;
-      }
-
-      drawVignette(renderCtx, CANVAS_WIDTH, CANVAS_HEIGHT);
-      renderCtx.globalAlpha = 1;
-      renderCtx.shadowBlur = 0;
-      animationRef.current = null;
-
-      if (isAnimating && onAnimationComplete) {
-        onAnimationComplete();
-      }
-    }
-
-    animationRef.current = requestAnimationFrame(animate);
-
-    return () => {
-      if (animationRef.current !== null) {
-        cancelAnimationFrame(animationRef.current);
-        animationRef.current = null;
-      }
-    };
-  }, [points, settings, sourceImage, targetImage, transferTargets, isAnimating, onAnimationComplete]);
-
-  function downloadImage() {
+  function handleExport() {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
-    const exportCanvas = document.createElement("canvas");
-    exportCanvas.width = canvas.width;
-    exportCanvas.height = canvas.height + 60;
-
-    const exportCtx = exportCanvas.getContext("2d");
-    if (!exportCtx) return;
-
-    exportCtx.fillStyle = "#f6f1e8";
-    exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
-
-    exportCtx.drawImage(canvas, 0, 0);
-
-    exportCtx.fillStyle = "rgba(80, 72, 62, 0.4)";
-    exportCtx.font = "12px serif";
-    exportCtx.textAlign = "center";
-    exportCtx.fillText(
-      "Hidden in Art — Material & Memory Transfer",
-      exportCanvas.width / 2,
-      canvas.height + 25
-    );
-    exportCtx.fillStyle = "rgba(100, 92, 82, 0.25)";
-    exportCtx.font = "10px sans-serif";
-    exportCtx.fillText(
-      "(Reconstructed from image fragments)",
-      exportCanvas.width / 2,
-      canvas.height + 42
-    );
-
-    const link = document.createElement("a");
-    link.download = "hidden-in-art-transfer.png";
-    link.href = exportCanvas.toDataURL("image/png");
-    link.click();
+    const a = document.createElement("a");
+    a.href     = canvas.toDataURL("image/png");
+    a.download = "hidden-in-art.png";
+    a.click();
   }
 
   return (
-    <div className="flex flex-col items-center gap-6">
-      <canvas
-        ref={canvasRef}
-        className="w-full max-w-5xl rounded border border-neutral-200 bg-white shadow-sm"
-      />
-
-      {points.length > 0 && transferTargets.length > 0 && (
-        <div className="mx-auto w-full max-w-5xl rounded border border-neutral-200 bg-white/60 px-6 py-4 text-sm text-neutral-700 backdrop-blur">
-          <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-center md:grid-cols-4">
-            <div>
-              <p className="mb-1 text-xs uppercase tracking-widest text-neutral-500">Style</p>
-              <p className="font-semibold">{settings.colorBlend > 30 ? "Guided" : "Pure"}</p>
-            </div>
-            <div>
-              <p className="mb-1 text-xs uppercase tracking-widest text-neutral-500">Sample Points</p>
-              <p className="font-semibold">{transferTargets.length}</p>
-            </div>
-            <div>
-              <p className="mb-1 text-xs uppercase tracking-widest text-neutral-500">Abstraction</p>
-              <p className="font-semibold">{settings.abstraction}%</p>
-            </div>
-            <div>
-              <p className="mb-1 text-xs uppercase tracking-widest text-neutral-500">Detail Retention</p>
-              <p className="font-semibold">{100 - settings.memoryDecay}%</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {points.length > 0 && (
+    <div className="flex flex-col items-center gap-3">
+      <canvas ref={canvasRef} className="max-w-full rounded shadow-md" />
+      <div className="flex w-full max-w-[900px] items-center justify-between px-1">
+        <p className="text-xs italic text-neutral-400">{statusLine}</p>
         <button
-          onClick={downloadImage}
-          className="rounded-full border border-neutral-300 px-5 py-2 text-sm font-medium transition hover:bg-neutral-100"
+          onClick={handleExport}
+          disabled={!pd}
+          className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
         >
-          Export as PNG
+          Export PNG
         </button>
-      )}
+      </div>
     </div>
   );
-}
-
-function drawBase(ctx: CanvasRenderingContext2D, width: number, height: number) {
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#f6f1e8";
-  ctx.fillRect(0, 0, width, height);
-  drawPaperGrain(ctx, width, height);
-  drawFrameMargin(ctx, width, height);
-}
-
-function drawEmptyState(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number
-) {
-  ctx.fillStyle = "rgba(80, 80, 80, 0.65)";
-  ctx.font = "16px serif";
-  ctx.textAlign = "center";
-  ctx.fillText("Upload an image to reconstruct a memory.", width / 2, height / 2);
-}
-
-function getBounds(points: ArtPoint[]) {
-  const xs = points.map((p) => p.x);
-  const ys = points.map((p) => p.y);
-
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-
-  return {
-    minX,
-    minY,
-    width: Math.max(maxX - minX, 1),
-    height: Math.max(maxY - minY, 1),
-  };
-}
-
-function fitRect(
-  mediaWidth: number,
-  mediaHeight: number,
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): Rect {
-  const scale = Math.min(width / mediaWidth, height / mediaHeight);
-  const fittedWidth = mediaWidth * scale;
-  const fittedHeight = mediaHeight * scale;
-
-  return {
-    x: x + (width - fittedWidth) / 2,
-    y: y + (height - fittedHeight) / 2,
-    width: fittedWidth,
-    height: fittedHeight,
-  };
-}
-
-function getSourceImageBounds(sourceImage: HTMLImageElement): Bounds {
-  const maxSize = 900;
-  const scale = Math.min(
-    maxSize / sourceImage.width,
-    maxSize / sourceImage.height,
-    1
-  );
-
-  return {
-    minX: 0,
-    minY: 0,
-    width: Math.max(1, Math.floor(sourceImage.width * scale)),
-    height: Math.max(1, Math.floor(sourceImage.height * scale)),
-  };
-}
-
-function drawThreads(
-  ctx: CanvasRenderingContext2D,
-  points: ArtPoint[],
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  width: number,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const isPainting = isPaintingFragmentActive(settings);
-  const threadPoints = points
-    .filter((point) => point.alpha * point.r > 0.62)
-    .slice(
-      0,
-      isPainting
-        ? Math.min(36, Math.floor(points.length * 0.045))
-        : Math.min(150, Math.floor(points.length * 0.18))
-    );
-
-  ctx.globalAlpha =
-    settings.mode === "thread-memory"
-      ? 0.07 - decay * 0.025
-      : isPainting
-        ? 0.018
-        : 0.035;
-  ctx.strokeStyle =
-    settings.mode === "lost-portrait" ? "rgb(102, 78, 50)" : "rgb(42, 38, 32)";
-  ctx.lineWidth = settings.mode === "thread-memory" ? 0.55 : 0.4;
-
-  for (let i = 0; i < threadPoints.length; i += 3) {
-    const p = threadPoints[i];
-    const x = p.x * scale + offsetX;
-    const y = p.y * scale + offsetY;
-    const anchorX = width * 0.5 + Math.sin(i * 0.41) * 130;
-    const anchorY = 82 + Math.cos(i * 0.27) * 18;
-
-    ctx.beginPath();
-    ctx.moveTo(anchorX, anchorY);
-    ctx.quadraticCurveTo((anchorX + x) / 2, y - 28 * scale, x, y);
-    ctx.stroke();
-  }
-
-  ctx.globalAlpha = 1;
-}
-
-function drawPoint(
-  ctx: CanvasRenderingContext2D,
-  point: ArtPoint,
-  index: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const abstraction = settings.abstraction / 100;
-  const x = point.x * scale + offsetX;
-  const y = point.y * scale + offsetY;
-  const noise = noise01(point.x + index * 3, point.y - index);
-  const baseRadius = point.r * scale;
-
-  if (noise < decay * 0.28 * (1 - Math.min(point.alpha, 0.85))) return;
-
-  if (isPaintingFragmentActive(settings)) {
-    drawPaintingFragment(ctx, point, index, scale, offsetX, offsetY, settings);
-    return;
-  }
-
-  const alphaMultiplier =
-    settings.mode === "lost-portrait"
-      ? 0.46
-      : settings.mode === "museum-dust"
-        ? 0.36
-        : settings.mode === "thread-memory"
-          ? 0.62
-          : 0.78;
-
-  ctx.globalAlpha = Math.max(
-    0.03,
-    point.alpha * alphaMultiplier * (1 - decay * 0.62)
-  );
-  ctx.fillStyle =
-    settings.mode === "lost-portrait"
-      ? toSepia(point.color)
-      : softenColor(point.color, settings.mode);
-  ctx.shadowColor =
-    settings.mode === "museum-dust"
-      ? "rgba(90, 72, 48, 0.16)"
-      : "rgba(80, 65, 45, 0.08)";
-  ctx.shadowBlur =
-    settings.mode === "museum-dust"
-      ? 7 + decay * 8
-      : settings.mode === "lost-portrait"
-        ? 2 + decay * 4
-        : decay * 3;
-
-  ctx.beginPath();
-
-  if (settings.mode === "museum-dust") {
-    const radius = baseRadius * (2.1 + abstraction * 0.9 + decay * 0.8);
-    ctx.ellipse(
-      x,
-      y,
-      radius * (1.25 + noise * 0.45),
-      radius * (0.7 + noise * 0.28),
-      noise * Math.PI,
-      0,
-      Math.PI * 2
-    );
-  } else if (settings.mode === "thread-memory") {
-    const radius = baseRadius * (0.8 + abstraction * 0.36);
-    ctx.ellipse(
-      x,
-      y,
-      radius * 1.55,
-      radius * 0.75,
-      noise * Math.PI,
-      0,
-      Math.PI * 2
-    );
-  } else if (settings.mode === "lost-portrait") {
-    const radius = baseRadius * (1.15 + decay * 0.55);
-    ctx.ellipse(
-      x,
-      y,
-      radius * 1.2,
-      radius * 0.9,
-      noise * Math.PI,
-      0,
-      Math.PI * 2
-    );
-  } else {
-    const radius = Math.max(0.65, baseRadius * (0.62 + abstraction * 0.2));
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-  }
-
-  ctx.fill();
-  ctx.shadowBlur = 0;
-  ctx.globalAlpha = 1;
-}
-
-function getVisiblePoints(points: ArtPoint[], settings: RenderSettings) {
-  const decay = settings.memoryDecay / 100;
-
-  return points.filter((point, index) => {
-    const importance = Math.min(point.importance ?? point.alpha * point.r, 1);
-    const paintingDropout = isPaintingFragmentActive(settings) ? 0.28 : 0;
-    const dropout = decay * (0.34 + paintingDropout) * (1 - importance * 0.72);
-    return noise01(point.x + index, point.y - index) > dropout;
-  });
-}
-
-function drawExtractedPaintingTransfer(
-  ctx: CanvasRenderingContext2D,
-  points: ArtPoint[],
-  targets: TransferTargetPoint[],
-  sourceImage: HTMLImageElement | null,
-  targetImage: HTMLImageElement | null,
-  settings: RenderSettings,
-  width: number,
-  height: number
-) {
-  if (!sourceImage || points.length === 0) {
-    drawEmptyState(ctx, width, height);
-    return;
-  }
-
-  const sourceBounds = getSourceImageBounds(sourceImage);
-  const sourceRect = fitRect(
-    sourceImage.width,
-    sourceImage.height,
-    52,
-    height * 0.57,
-    width - 104,
-    height * 0.37
-  );
-  const topScale = settings.topReconstructionScale / 100;
-  const targetRect = {
-    x: width * 0.5 - 200 * topScale,
-    y: 36,
-    width: 400 * topScale,
-    height: 310 * topScale,
-  };
-  const markerScale = settings.markerSize / 16;
-  const visibleTargets = targets;
-
-  drawSourcePanel(ctx, sourceImage, sourceRect, settings);
-  if (visibleTargets.length === 0) {
-    drawNoTargetState(ctx, targetRect);
-    drawTransferFrames(ctx, sourceRect, targetRect);
-    return;
-  }
-
-  drawTargetReconstruction(
-    ctx,
-    points,
-    visibleTargets,
-    sourceImage,
-    targetImage,
-    sourceBounds,
-    targetRect,
-    markerScale,
-    settings
-  );
-
-  if (settings.showThreads) {
-    drawTransferLines(
-      ctx,
-      points,
-      visibleTargets,
-      sourceRect,
-      sourceBounds,
-      targetRect,
-      markerScale
-    );
-  }
-
-  drawSourceMarkers(
-    ctx,
-    points,
-    visibleTargets,
-    sourceRect,
-    sourceBounds,
-    markerScale,
-    settings
-  );
-  drawTransferFrames(ctx, sourceRect, targetRect);
-}
-
-function drawSourcePanel(
-  ctx: CanvasRenderingContext2D,
-  sourceImage: HTMLImageElement,
-  rect: Rect,
-  settings: RenderSettings
-) {
-  ctx.save();
-  ctx.globalAlpha = settings.preserveSourceImage ? 0.92 : 0.58;
-  ctx.drawImage(sourceImage, rect.x, rect.y, rect.width, rect.height);
-
-  ctx.globalCompositeOperation = "source-atop";
-  ctx.globalAlpha = 0.18;
-  ctx.fillStyle = "rgb(128, 82, 48)";
-  ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-  ctx.restore();
-}
-
-function drawTargetReconstruction(
-  ctx: CanvasRenderingContext2D,
-  points: ArtPoint[],
-  targets: TransferTargetPoint[],
-  sourceImage: HTMLImageElement,
-  targetImage: HTMLImageElement | null,
-  sourceBounds: Bounds,
-  targetRect: Rect,
-  markerScale: number,
-  settings: RenderSettings
-) {
-  const opacity = settings.reconstructionOpacity / 100;
-  const targetBlend = settings.colorBlend / 100;
-  const sortedTargets = [...targets].sort((a, b) => a.importance - b.importance);
-
-  if (targetImage) {
-    drawTargetGhostUnderlay(ctx, targetImage, targetRect, opacity, targetBlend);
-    drawTargetEdgeGuide(ctx, targetImage, targetRect, opacity, targetBlend);
-  }
-
-  for (let i = 0; i < sortedTargets.length; i++) {
-    const target = sortedTargets[i];
-    const point = points[target.sourceIndex] ?? points[i % points.length];
-    const x = targetRect.x + target.x * targetRect.width;
-    const y = targetRect.y + target.y * targetRect.height;
-    const layerScale =
-      i < sortedTargets.length * 0.3
-        ? 1.42
-        : target.importance > 0.42
-          ? 0.92
-          : 0.62;
-    const radius =
-      target.r * markerScale * (0.78 + target.importance * 0.62) * layerScale;
-
-    if (noise01(target.x * 400 + i, target.y * 400 - i) < settings.memoryDecay / 760) {
-      continue;
-    }
-
-    drawTargetColorUnderlay(
-      ctx,
-      x,
-      y,
-      Math.max(4.2, radius * (1.04 + (1 - target.importance) * 0.18)),
-      target.targetColor,
-      opacity * (0.12 + target.importance * 0.1)
-    );
-
-    drawCircularSourcePatch(
-      ctx,
-      sourceImage,
-      point,
-      sourceBounds,
-      x,
-      y,
-      Math.max(3.5, radius),
-      target.angle,
-      opacity * (0.58 + target.importance * 0.42),
-      target.targetColor,
-      target.importance,
-      targetBlend
-    );
-
-    if (target.importance > 0.52) {
-      drawTargetDetailDot(
-        ctx,
-        x,
-        y,
-        Math.max(1.8, radius * 0.42),
-        target.targetColor,
-        opacity * (0.2 + target.importance * 0.22)
-      );
-    }
-  }
-}
-
-function drawTargetGhostUnderlay(
-  ctx: CanvasRenderingContext2D,
-  targetImage: HTMLImageElement,
-  targetRect: Rect,
-  opacity: number,
-  targetBlend: number
-) {
-  ctx.save();
-  ctx.globalAlpha = opacity * (0.18 + targetBlend * 0.22);
-  ctx.filter = "grayscale(1) sepia(0.35) contrast(1.08)";
-  ctx.drawImage(
-    targetImage,
-    targetRect.x,
-    targetRect.y,
-    targetRect.width,
-    targetRect.height
-  );
-  ctx.filter = "none";
-  ctx.globalCompositeOperation = "source-atop";
-  ctx.globalAlpha = opacity * 0.05;
-  ctx.fillStyle = "rgb(109, 82, 52)";
-  ctx.fillRect(targetRect.x, targetRect.y, targetRect.width, targetRect.height);
-  ctx.restore();
-}
-
-function drawTargetEdgeGuide(
-  ctx: CanvasRenderingContext2D,
-  targetImage: HTMLImageElement,
-  targetRect: Rect,
-  opacity: number,
-  targetBlend: number
-) {
-  const sampleWidth = 150;
-  const sampleHeight = Math.max(
-    1,
-    Math.round((targetImage.height / targetImage.width) * sampleWidth)
-  );
-  const edgeCanvas = document.createElement("canvas");
-  const edgeCtx = edgeCanvas.getContext("2d", { willReadFrequently: true });
-
-  if (!edgeCtx) return;
-
-  edgeCanvas.width = sampleWidth;
-  edgeCanvas.height = sampleHeight;
-  edgeCtx.drawImage(targetImage, 0, 0, sampleWidth, sampleHeight);
-
-  const imageData = edgeCtx.getImageData(0, 0, sampleWidth, sampleHeight);
-  const data = imageData.data;
-  const step = 3;
-
-  ctx.save();
-  ctx.strokeStyle = "rgba(68, 56, 42, 0.22)";
-  ctx.lineWidth = 0.42;
-  ctx.globalAlpha = opacity * (0.14 + targetBlend * 0.14);
-
-  for (let y = step; y < sampleHeight - step; y += step) {
-    for (let x = step; x < sampleWidth - step; x += step) {
-      const center = targetBrightnessAt(data, sampleWidth, x, y);
-      const right = targetBrightnessAt(data, sampleWidth, x + step, y);
-      const down = targetBrightnessAt(data, sampleWidth, x, y + step);
-      const edge = Math.abs(center - right) + Math.abs(center - down);
-
-      if (edge < 62) continue;
-      if (noise01(x * 13, y * 17) < 0.38) continue;
-
-      const px = targetRect.x + (x / sampleWidth) * targetRect.width;
-      const py = targetRect.y + (y / sampleHeight) * targetRect.height;
-      const length = 2.6 + Math.min(edge / 70, 2.8);
-      const angle = Math.atan2(down - center, right - center) + Math.PI / 2;
-
-      ctx.beginPath();
-      ctx.moveTo(px - Math.cos(angle) * length, py - Math.sin(angle) * length);
-      ctx.lineTo(px + Math.cos(angle) * length, py + Math.sin(angle) * length);
-      ctx.stroke();
-    }
-  }
-
-  ctx.restore();
-}
-
-function targetBrightnessAt(
-  data: Uint8ClampedArray,
-  width: number,
-  x: number,
-  y: number
-) {
-  const index = (y * width + x) * 4;
-  return data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
-}
-
-function drawTargetColorUnderlay(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  radius: number,
-  color: string,
-  alpha: number
-) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawTargetDetailDot(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  radius: number,
-  color: string,
-  alpha: number
-) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(x, y, radius, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawTransferLines(
-  ctx: CanvasRenderingContext2D,
-  points: ArtPoint[],
-  targets: TransferTargetPoint[],
-  sourceRect: Rect,
-  sourceBounds: Bounds,
-  targetRect: Rect,
-  markerScale: number
-) {
-  ctx.save();
-  ctx.strokeStyle = "rgba(70, 66, 58, 0.085)";
-  ctx.lineWidth = 0.28;
-
-  const importantTargets = [...targets]
-    .sort((a, b) => b.importance - a.importance)
-    .slice(0, Math.min(56, Math.floor(targets.length * 0.13)));
-
-  for (let i = 0; i < importantTargets.length; i++) {
-    const target = importantTargets[i];
-    if (noise01(target.x * 300 + i, target.y * 300 - i) < 0.42) continue;
-
-    const point = points[target.sourceIndex] ?? points[i % points.length];
-    const from = sourcePointToCanvas(point, sourceRect, sourceBounds);
-    const to = {
-      x: targetRect.x + target.x * targetRect.width,
-      y: targetRect.y + target.y * targetRect.height,
-    };
-
-    ctx.globalAlpha = 0.1 + target.importance * 0.14;
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.bezierCurveTo(
-      from.x,
-      from.y - 170 * markerScale,
-      to.x,
-      to.y + 110 * markerScale,
-      to.x,
-      to.y
-    );
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
-function drawSourceMarkers(
-  ctx: CanvasRenderingContext2D,
-  points: ArtPoint[],
-  targets: TransferTargetPoint[],
-  sourceRect: Rect,
-  sourceBounds: Bounds,
-  markerScale: number,
-  settings: RenderSettings
-) {
-  ctx.save();
-  const markerTargets = [...targets]
-    .sort((a, b) => b.importance - a.importance)
-    .slice(0, Math.min(120, Math.floor(targets.length * 0.18)));
-
-  for (let i = 0; i < markerTargets.length; i++) {
-    const target = markerTargets[i];
-    if (noise01(target.x * 200 + i, target.y * 200) < 0.28) continue;
-
-    const point = points[target.sourceIndex] ?? points[i % points.length];
-    const marker = sourcePointToCanvas(point, sourceRect, sourceBounds);
-    const radius = Math.max(
-      2.4,
-      (settings.markerSize * 0.18 + target.importance * settings.markerSize * 0.18) *
-        markerScale
-    );
-
-    ctx.globalAlpha = 0.08;
-    ctx.fillStyle = "rgba(255, 253, 247, 0.34)";
-    ctx.beginPath();
-    ctx.arc(marker.x, marker.y, radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalAlpha = 0.32;
-    ctx.strokeStyle = "rgba(255, 253, 247, 0.78)";
-    ctx.lineWidth = 0.62;
-    ctx.stroke();
-
-    ctx.globalAlpha = 0.14;
-    ctx.strokeStyle = "rgba(83, 70, 55, 0.28)";
-    ctx.lineWidth = 0.86;
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
-function drawCircularSourcePatch(
-  ctx: CanvasRenderingContext2D,
-  sourceImage: HTMLImageElement,
-  point: ArtPoint,
-  sourceBounds: Bounds,
-  x: number,
-  y: number,
-  radius: number,
-  angle: number,
-  alpha: number,
-  targetColor: string,
-  importance: number,
-  targetBlend: number
-) {
-  const sx = ((point.x - sourceBounds.minX) / sourceBounds.width) * sourceImage.width;
-  const sy = ((point.y - sourceBounds.minY) / sourceBounds.height) * sourceImage.height;
-  const cropSize = Math.min(
-    sourceImage.width,
-    sourceImage.height,
-    Math.max(8, point.patchSize ?? radius * 2.8)
-  );
-  const cropX = Math.max(0, Math.min(sourceImage.width - cropSize, sx - cropSize / 2));
-  const cropY = Math.max(0, Math.min(sourceImage.height - cropSize, sy - cropSize / 2));
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = alpha;
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.drawImage(
-    sourceImage,
-    cropX,
-    cropY,
-    cropSize,
-    cropSize,
-    -radius,
-    -radius,
-    radius * 2,
-    radius * 2
-  );
-
-  ctx.globalCompositeOperation = "source-atop";
-  ctx.globalAlpha = alpha * (0.08 + targetBlend * (0.24 + importance * 0.3));
-  ctx.fillStyle = targetColor;
-  ctx.fillRect(-radius, -radius, radius * 2, radius * 2);
-  ctx.globalCompositeOperation = "source-over";
-
-  ctx.globalAlpha = alpha * 0.28;
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.58)";
-  ctx.lineWidth = Math.max(0.35, radius * 0.08);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawTransferFrames(
-  ctx: CanvasRenderingContext2D,
-  sourceRect: Rect,
-  targetRect: Rect
-) {
-  ctx.save();
-  ctx.strokeStyle = "rgba(80, 68, 51, 0.18)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(sourceRect.x, sourceRect.y, sourceRect.width, sourceRect.height);
-  ctx.strokeRect(targetRect.x, targetRect.y, targetRect.width, targetRect.height);
-  ctx.restore();
-}
-
-function drawNoTargetState(ctx: CanvasRenderingContext2D, targetRect: Rect) {
-  ctx.save();
-  ctx.strokeStyle = "rgba(80, 68, 51, 0.14)";
-  ctx.strokeRect(targetRect.x, targetRect.y, targetRect.width, targetRect.height);
-  ctx.fillStyle = "rgba(80, 72, 62, 0.62)";
-  ctx.font = "15px serif";
-  ctx.textAlign = "center";
-  ctx.fillText(
-    "No target image selected.",
-    targetRect.x + targetRect.width / 2,
-    targetRect.y + targetRect.height / 2
-  );
-  ctx.restore();
-}
-
-function sourcePointToCanvas(point: ArtPoint, rect: Rect, bounds: Bounds) {
-  return {
-    x: rect.x + ((point.x - bounds.minX) / bounds.width) * rect.width,
-    y: rect.y + ((point.y - bounds.minY) / bounds.height) * rect.height,
-  };
-}
-
-function drawPaintingFragmentMode(
-  ctx: CanvasRenderingContext2D,
-  points: ArtPoint[],
-  settings: RenderSettings,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  width: number,
-  height: number
-) {
-  const decay = settings.memoryDecay / 100;
-  const densityScale = Math.max(0.9, Math.min(1.18, Math.sqrt((width * height) / (900 * 650))));
-  const orderedPoints = [...points].sort((a, b) => a.importance - b.importance);
-
-  // Pass 1: low opacity background material so the image reads as a painted surface, not isolated marks.
-  for (let i = 0; i < orderedPoints.length; i++) {
-    const point = orderedPoints[i];
-    const importance = Math.min(point.importance ?? point.alpha, 1);
-
-    if (importance > 0.78) continue;
-    if (noise01(point.x + i * 11, point.y - i * 7) < decay * 0.12) continue;
-
-    drawFragmentWash(ctx, point, i, scale * densityScale, offsetX, offsetY, settings);
-  }
-
-  // Pass 2: cropped painting tiles. These do most of the reconstruction work.
-  for (let i = 0; i < orderedPoints.length; i++) {
-    const point = orderedPoints[i];
-    const importance = Math.min(point.importance ?? point.alpha, 1);
-
-    if (importance < 0.08 && noise01(point.x - i, point.y + i) < 0.42) continue;
-    if (noise01(point.x - i * 5, point.y + i * 9) < decay * 0.2 * (1 - importance)) {
-      continue;
-    }
-
-    drawFragmentPatch(ctx, point, i, scale, offsetX, offsetY, settings);
-  }
-
-  // Pass 3: thick brush dashes add painterly material without becoming circular particles.
-  for (let i = 0; i < orderedPoints.length; i++) {
-    const point = orderedPoints[i];
-    const importance = Math.min(point.importance ?? point.alpha, 1);
-
-    if (importance < 0.16) continue;
-    if (noise01(point.x + i * 23, point.y - i * 3) < decay * 0.22 * (1 - importance)) {
-      continue;
-    }
-
-    drawBrushStroke(ctx, point, i, scale, offsetX, offsetY, settings);
-  }
-
-  // Pass 4: small sharper chips preserve face edges, shadows, and contours.
-  for (let i = 0; i < orderedPoints.length; i++) {
-    const point = orderedPoints[i];
-    const importance = Math.min(point.importance ?? point.alpha, 1);
-
-    if (importance < 0.38) continue;
-    if (noise01(point.x + i * 19, point.y + i * 13) < decay * 0.3 * (1 - importance)) {
-      continue;
-    }
-
-    drawDetailFragment(ctx, point, i, scale, offsetX, offsetY, settings);
-  }
-}
-
-function drawPaintingFragment(
-  ctx: CanvasRenderingContext2D,
-  point: ArtPoint,
-  index: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const colorBlend = settings.colorBlend / 100;
-  const importance = Math.min(point.importance ?? point.alpha, 1);
-  const x = point.x * scale + offsetX;
-  const y = point.y * scale + offsetY;
-  const baseRadius = point.r * scale;
-  const noise = noise01(point.x + index * 3, point.y - index);
-
-  if (noise < decay * 0.42 * (1 - importance)) return;
-
-  const angle =
-    (point.angle ?? 0) +
-    (noise01(point.x - index, point.y + index) - 0.5) * 0.62;
-  const fragmentColor = point.paintingColor ?? point.color;
-  const bodyColor = point.color;
-  const darkPigment = mixColor(fragmentColor, "rgb(34, 26, 18)", 0.18 + importance * 0.22);
-  const palePigment = mixColor(bodyColor, "rgb(246, 241, 232)", 0.16 + (1 - importance) * 0.28);
-
-  drawPaintingWashShape(
-    ctx,
-    x,
-    y,
-    baseRadius,
-    angle,
-    noise,
-    importance,
-    bodyColor,
-    settings
-  );
-  drawPaintingPatchShape(
-    ctx,
-    x,
-    y,
-    baseRadius,
-    angle,
-    noise,
-    importance,
-    bodyColor,
-    palePigment,
-    fragmentColor,
-    settings
-  );
-
-  if (importance > 0.22) {
-    drawPaintingShardShape(
-      ctx,
-      x,
-      y,
-      baseRadius,
-      angle,
-      noise,
-      importance,
-      fragmentColor,
-      darkPigment,
-      settings
-    );
-  }
-
-  if (importance > 0.48 && colorBlend < 0.98) {
-    drawStructureTrace(
-      ctx,
-      x,
-      y,
-      baseRadius,
-      angle,
-      point.sourceColor ?? bodyColor,
-      importance,
-      1 - colorBlend
-    );
-  }
-}
-
-function drawFragmentWash(
-  ctx: CanvasRenderingContext2D,
-  point: ArtPoint,
-  index: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const importance = Math.min(point.importance ?? point.alpha, 1);
-  const x = point.x * scale + offsetX;
-  const y = point.y * scale + offsetY;
-  const baseRadius = point.r * scale * (1.12 + (1 - importance) * 0.32);
-  const noise = noise01(point.x + index * 3, point.y - index);
-  const angle =
-    point.angle + (noise01(point.x - index, point.y + index) - 0.5) * 0.62;
-
-  if (noise < decay * 0.18 * (1 - importance)) return;
-
-  drawPaintingWashShape(
-    ctx,
-    x,
-    y,
-    baseRadius,
-    angle,
-    noise,
-    importance,
-    point.color,
-    settings
-  );
-}
-
-function drawFragmentPatch(
-  ctx: CanvasRenderingContext2D,
-  point: ArtPoint,
-  index: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const importance = Math.min(point.importance ?? point.alpha, 1);
-  const x = point.x * scale + offsetX;
-  const y = point.y * scale + offsetY;
-  const baseRadius = point.r * scale * (1 + importance * 0.16);
-  const noise = noise01(point.x + index * 3, point.y - index);
-  const angle =
-    point.angle + (noise01(point.x - index, point.y + index) - 0.5) * 0.5;
-  const fragmentColor = point.paintingColor ?? point.color;
-  const palePigment = mixColor(point.color, "rgb(246, 241, 232)", 0.16 + (1 - importance) * 0.28);
-
-  if (noise < decay * 0.22 * (1 - importance)) return;
-
-  drawPaintingPatchShape(
-    ctx,
-    x,
-    y,
-    baseRadius,
-    angle,
-    noise,
-    importance,
-    point.color,
-    palePigment,
-    fragmentColor,
-    settings
-  );
-}
-
-function drawBrushStroke(
-  ctx: CanvasRenderingContext2D,
-  point: ArtPoint,
-  index: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const importance = Math.min(point.importance ?? point.alpha, 1);
-  const x = point.x * scale + offsetX;
-  const y = point.y * scale + offsetY;
-  const baseRadius = point.r * scale;
-  const noise = noise01(point.x + index * 3, point.y - index);
-  const angle =
-    point.angle + (noise01(point.x - index, point.y + index) - 0.5) * 0.32;
-  const fragmentColor = point.paintingColor ?? point.color;
-  const strokeColor = mixColor(point.color, fragmentColor, 0.52 + importance * 0.28);
-  const length = baseRadius * (2.2 + settings.abstraction / 42 + importance * 2.1);
-  const thickness = Math.max(1.1, baseRadius * (0.34 + importance * 0.42));
-  const alpha = Math.max(0.035, point.alpha * (0.2 + importance * 0.5) * (1 - decay * 0.42));
-
-  if (noise < decay * 0.24 * (1 - importance)) return;
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = alpha;
-  ctx.strokeStyle = strokeColor;
-  ctx.lineWidth = thickness;
-  ctx.lineCap = "round";
-  ctx.shadowColor = "rgba(59, 44, 27, 0.1)";
-  ctx.shadowBlur = (1 - importance) * 4 + decay * 2;
-
-  ctx.beginPath();
-  ctx.moveTo(-length * 0.5, (noise - 0.5) * thickness);
-  ctx.quadraticCurveTo(
-    0,
-    (0.5 - noise) * thickness * 0.8,
-    length * 0.5,
-    (noise01(y, x) - 0.5) * thickness
-  );
-  ctx.stroke();
-
-  ctx.globalAlpha = alpha * 0.28;
-  ctx.strokeStyle = mixColor(fragmentColor, "rgb(248, 242, 226)", 0.24);
-  ctx.lineWidth = Math.max(0.4, thickness * 0.34);
-  ctx.beginPath();
-  ctx.moveTo(-length * 0.38, -thickness * 0.24);
-  ctx.lineTo(length * 0.36, thickness * 0.08);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawDetailFragment(
-  ctx: CanvasRenderingContext2D,
-  point: ArtPoint,
-  index: number,
-  scale: number,
-  offsetX: number,
-  offsetY: number,
-  settings: RenderSettings
-) {
-  const colorBlend = settings.colorBlend / 100;
-  const importance = Math.min(point.importance ?? point.alpha, 1);
-  const x = point.x * scale + offsetX;
-  const y = point.y * scale + offsetY;
-  const baseRadius = point.r * scale;
-  const noise = noise01(point.x + index * 3, point.y - index);
-  const angle =
-    point.angle + (noise01(point.x - index, point.y + index) - 0.5) * 0.22;
-  const fragmentColor = point.paintingColor ?? point.color;
-  const darkPigment = mixColor(fragmentColor, "rgb(28, 21, 16)", 0.2 + importance * 0.28);
-
-  drawPaintingShardShape(
-    ctx,
-    x,
-    y,
-    baseRadius * 0.86,
-    angle,
-    noise,
-    importance,
-    fragmentColor,
-    darkPigment,
-    settings
-  );
-
-  if (importance > 0.58 && colorBlend < 0.98) {
-    drawStructureTrace(
-      ctx,
-      x,
-      y,
-      baseRadius,
-      angle,
-      point.sourceColor ?? point.color,
-      importance,
-      1 - colorBlend
-    );
-  }
-}
-
-function drawPaintingWashShape(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  baseRadius: number,
-  angle: number,
-  noise: number,
-  importance: number,
-  color: string,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const abstraction = settings.abstraction / 100;
-  const width = baseRadius * (6.4 + abstraction * 2.8 + noise * 1.8);
-  const height = baseRadius * (2.4 + (1 - importance) * 2.2);
-  const alpha = Math.max(
-    0.026,
-    (0.078 + (1 - importance) * 0.14) * (1 - decay * 0.34)
-  );
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle + (noise - 0.5) * 0.35);
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.shadowColor = "rgba(68, 51, 32, 0.08)";
-  ctx.shadowBlur = 10 + decay * 7;
-
-  if (noise > 0.52) {
-    ctx.beginPath();
-    ctx.ellipse(0, 0, width * 0.5, height * 0.5, 0, 0, Math.PI * 2);
-    ctx.fill();
-  } else {
-    drawRoughPatchPath(ctx, width, height, noise, 0.34);
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
-function drawPaintingPatchShape(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  baseRadius: number,
-  angle: number,
-  noise: number,
-  importance: number,
-  color: string,
-  paleColor: string,
-  strokeColor: string,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const abstraction = settings.abstraction / 100;
-  const width = baseRadius * (3.2 + abstraction * 2.15 + importance * 2.2);
-  const height = baseRadius * (1.2 + noise * 0.78 + importance * 0.58);
-  const alpha = Math.max(
-    0.055,
-    (0.22 + importance * 0.48) * (1 - decay * 0.34)
-  );
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.shadowColor = "rgba(72, 55, 36, 0.12)";
-  ctx.shadowBlur = (1 - importance) * 7 + decay * 4;
-
-  drawRoughPatchPath(ctx, width, height, noise, 0.22);
-  ctx.fill();
-
-  ctx.globalAlpha = alpha * 0.42;
-  ctx.fillStyle = paleColor;
-  drawRoughPatchPath(ctx, width * 0.72, height * 0.52, noise + 0.3, 0.18);
-  ctx.fill();
-
-  for (let i = 0; i < 3; i++) {
-    const lineNoise = noise01(x + i * 17, y - i * 13);
-
-    ctx.globalAlpha = alpha * (0.18 + importance * 0.16);
-    ctx.strokeStyle = i === 1 ? paleColor : strokeColor;
-    ctx.lineWidth = Math.max(0.28, height * (0.08 + lineNoise * 0.06));
-    ctx.beginPath();
-    ctx.moveTo(-width * (0.42 + lineNoise * 0.12), height * (lineNoise - 0.5));
-    ctx.lineTo(width * (0.42 + lineNoise * 0.16), height * (0.5 - lineNoise));
-    ctx.stroke();
-  }
-
-  ctx.restore();
-}
-
-function drawPaintingShardShape(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  baseRadius: number,
-  angle: number,
-  noise: number,
-  importance: number,
-  color: string,
-  darkColor: string,
-  settings: RenderSettings
-) {
-  const decay = settings.memoryDecay / 100;
-  const width = baseRadius * (1.25 + importance * 1.8);
-  const height = baseRadius * (0.36 + importance * 0.5);
-  const alpha = Math.max(0.055, (0.3 + importance * 0.58) * (1 - decay * 0.34));
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle + (noise - 0.5) * 0.25);
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.shadowColor = "rgba(48, 36, 22, 0.16)";
-  ctx.shadowBlur = Math.max(0, (1 - importance) * 5 + decay * 2);
-
-  drawRoughPatchPath(ctx, width, height, noise + 0.61, 0.12);
-  ctx.fill();
-
-  ctx.globalAlpha = alpha * 0.52;
-  ctx.strokeStyle = darkColor;
-  ctx.lineWidth = Math.max(0.32, height * 0.18);
-  ctx.beginPath();
-  ctx.moveTo(-width * 0.46, -height * 0.15);
-  ctx.lineTo(width * 0.42, height * 0.1);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawStructureTrace(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  baseRadius: number,
-  angle: number,
-  color: string,
-  importance: number,
-  amount: number
-) {
-  const width = baseRadius * (1.1 + importance * 1.3);
-  const height = baseRadius * (0.24 + importance * 0.22);
-
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.globalAlpha = amount * (0.04 + importance * 0.08);
-  ctx.fillStyle = color;
-  ctx.fillRect(-width / 2, -height / 2, width, height);
-  ctx.restore();
-}
-
-function drawRoughPatchPath(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  seed: number,
-  roughness: number
-) {
-  const halfWidth = width / 2;
-  const halfHeight = height / 2;
-  const n1 = noise01(seed * 101, width);
-  const n2 = noise01(seed * 131, height);
-  const n3 = noise01(seed * 173, width + height);
-  const n4 = noise01(seed * 191, width - height);
-  const rX = width * roughness;
-  const rY = height * roughness;
-
-  ctx.beginPath();
-  ctx.moveTo(-halfWidth + (n1 - 0.5) * rX, -halfHeight + (n2 - 0.5) * rY);
-  ctx.lineTo(halfWidth + (n2 - 0.5) * rX, -halfHeight + (n3 - 0.5) * rY);
-  ctx.lineTo(halfWidth + (n3 - 0.5) * rX, halfHeight + (n4 - 0.5) * rY);
-  ctx.lineTo(-halfWidth + (n4 - 0.5) * rX, halfHeight + (n1 - 0.5) * rY);
-  ctx.closePath();
-}
-
-function drawPaperGrain(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number
-) {
-  ctx.globalAlpha = 0.05;
-
-  for (let i = 0; i < 5200; i++) {
-    const x = (noise01(i, 11) * width) | 0;
-    const y = (noise01(i, 29) * height) | 0;
-    const shade = Math.floor(128 + noise01(i, 47) * 72);
-
-    ctx.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
-    ctx.fillRect(x, y, 1, 1);
-  }
-
-  ctx.globalAlpha = 1;
-}
-
-function drawFrameMargin(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number
-) {
-  ctx.strokeStyle = "rgba(84, 72, 54, 0.16)";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(34, 34, width - 68, height - 68);
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.42)";
-  ctx.strokeRect(42, 42, width - 84, height - 84);
-}
-
-function drawVignette(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number
-) {
-  const gradient = ctx.createRadialGradient(
-    width / 2,
-    height / 2,
-    width * 0.18,
-    width / 2,
-    height / 2,
-    width * 0.68
-  );
-
-  gradient.addColorStop(0, "rgba(255, 255, 255, 0)");
-  gradient.addColorStop(1, "rgba(70, 52, 32, 0.13)");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
-}
-
-function parseRgb(color: string) {
-  const channels = color.match(/\d+/g)?.map(Number) ?? [90, 76, 58];
-  const [r, g, b] = channels;
-
-  return { r, g, b };
-}
-
-function toSepia(color: string) {
-  const { r, g, b } = parseRgb(color);
-  const value = r * 0.299 + g * 0.587 + b * 0.114;
-  const sr = Math.min(148, value * 0.62 + 56);
-  const sg = Math.min(126, value * 0.5 + 45);
-  const sb = Math.min(94, value * 0.36 + 32);
-
-  return `rgb(${sr | 0}, ${sg | 0}, ${sb | 0})`;
-}
-
-function softenColor(color: string, mode: RenderSettings["mode"]) {
-  if (mode === "point-memory") return color;
-
-  const { r, g, b } = parseRgb(color);
-  const mix = mode === "museum-dust" ? 0.34 : 0.18;
-  const paper = { r: 246, g: 241, b: 232 };
-
-  return `rgb(${(r * (1 - mix) + paper.r * mix) | 0}, ${
-    (g * (1 - mix) + paper.g * mix) | 0
-  }, ${(b * (1 - mix) + paper.b * mix) | 0})`;
-}
-
-function mixColor(color: string, target: string, amount: number) {
-  const source = parseRgb(color);
-  const destination = parseRgb(target);
-  const clamped = Math.max(0, Math.min(1, amount));
-
-  return `rgb(${(source.r * (1 - clamped) + destination.r * clamped) | 0}, ${
-    (source.g * (1 - clamped) + destination.g * clamped) | 0
-  }, ${(source.b * (1 - clamped) + destination.b * clamped) | 0})`;
-}
-
-function isPaintingFragmentActive(settings: RenderSettings) {
-  return (
-    settings.mode === "painting-fragment" ||
-    (settings.usePaintingFragment && settings.paintingSource !== "none")
-  );
-}
-
-function noise01(x: number, y: number): number {
-  const value = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
-  return value - Math.floor(value);
 }

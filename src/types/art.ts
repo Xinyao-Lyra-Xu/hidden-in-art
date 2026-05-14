@@ -1,76 +1,25 @@
-export type RenderMode =
-  | "thread-memory"
-  | "museum-dust"
-  | "point-memory"
-  | "lost-portrait"
-  | "painting-fragment"
-  | "extracted-painting-transfer";
-
-export type PaintingSource =
-  | "none"
-  | "van-gogh"
-  | "monet"
-  | "vermeer"
-  | "klimt";
-
-export const PAINTING_SOURCES = [
-  "van-gogh",
-  "monet",
-  "vermeer",
-  "klimt",
-] as const satisfies readonly Exclude<PaintingSource, "none">[];
-
-export type ArtPoint = {
-  x: number;
-  y: number;
-  r: number;
-  color: string;
-  alpha: number;
-  sourceColor?: string;
-  paintingColor?: string;
-  patchSize?: number;
-  importance: number;
-  angle: number;
+export type RenderSettings = {
+  patchCount: number;      // 40–200, default 100
+  targetPainting: string;
 };
 
-export type TransferTargetPoint = {
-  x: number;
-  y: number;
-  r: number;
-  sourceIndex: number;
-  importance: number;
-  angle: number;
-  targetColor: string;
-  targetBrightness: number;
-  targetSaturation: number;
-  targetWarmth: number;
-};
-
-export type ArtworkMetadata = {
+export type MosaicPainting = {
   id: string;
   title: string;
   artist: string;
-  image: string;
-  tags: string[];
-  mood: string[];
-  palette: string[];
-  complexity: number;
-  brightness: number;
-  saturation: number;
+  metId: number;
+  query: string;
 };
 
-export type RenderSettings = {
-  mode: RenderMode;
-  pointDensity: number;
-  abstraction: number;
-  paletteSize: number;
-  showThreads: boolean;
-  memoryDecay: number;
-  paintingSource: PaintingSource;
-  colorBlend: number;
-  usePaintingFragment: boolean;
-  markerSize: number;
-  topReconstructionScale: number;
-  preserveSourceImage: boolean;
-  reconstructionOpacity: number;
-};
+export const MOSAIC_PAINTINGS: MosaicPainting[] = [
+  { id: "grenouillere",  title: "La Grenouillère",                    artist: "Monet",             metId: 436529, query: "La Grenouillere Monet" },
+  { id: "great-wave",    title: "The Great Wave off Kanagawa",        artist: "Hokusai",           metId: 45434,  query: "Great Wave Kanagawa Hokusai" },
+  { id: "cypresses",     title: "Wheat Field with Cypresses",         artist: "Van Gogh",          metId: 437984, query: "Wheat Field Cypresses Van Gogh" },
+  { id: "irises",        title: "Irises",                             artist: "Van Gogh",          metId: 436528, query: "Irises Van Gogh" },
+  { id: "dancing-class", title: "The Dancing Class",                  artist: "Degas",             metId: 436928, query: "Dancing Class Degas" },
+  { id: "by-seashore",   title: "By the Seashore",                    artist: "Renoir",            metId: 437654, query: "By Seashore Renoir" },
+  { id: "aristotle",     title: "Aristotle with a Bust of Homer",     artist: "Rembrandt",         metId: 437394, query: "Aristotle Bust Homer Rembrandt" },
+  { id: "toledo",        title: "View of Toledo",                     artist: "El Greco",          metId: 29150,  query: "View Toledo El Greco" },
+  { id: "apples-pears",  title: "Still Life with Apples and Pears",   artist: "Cézanne",           metId: 435882, query: "Still Life Apples Pears Cezanne" },
+  { id: "moulin-rouge",  title: "The Englishman at the Moulin Rouge",  artist: "Toulouse-Lautrec",  metId: 437539, query: "Englishman Moulin Rouge Toulouse-Lautrec" },
+];
