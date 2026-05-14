@@ -210,8 +210,8 @@ function drawThreadArt(
   pd:         PaintData,
   userCanvas: HTMLCanvasElement,
   patchCount: number,
+  focal:      FocalBox,
 ) {
-  const focal  = detectSalientRegion(pd.pixels, pd.w, pd.h);
   const focalW = focal.nx1 - focal.nx0;
   const focalH = focal.ny1 - focal.ny0;
 
@@ -326,6 +326,68 @@ function drawThreadArt(
   ctx.restore();
 }
 
+// ── Painting locator ──────────────────────────────────────────────────────────
+
+function regionLabel(f: FocalBox): string {
+  const cx = (f.nx0 + f.nx1) / 2;
+  const cy = (f.ny0 + f.ny1) / 2;
+  const h  = cx < 0.33 ? "left" : cx > 0.67 ? "right" : "";
+  const v  = cy < 0.33 ? "top"  : cy > 0.67 ? "bottom" : "";
+  if (v && h) return `${v}-${h}`;
+  return v || h || "center";
+}
+
+function PaintingLocator({
+  focal,
+  artwork,
+}: {
+  focal:   FocalBox;
+  artwork: ArtworkMetadata;
+}) {
+  const q   = encodeURIComponent(artwork.query ?? `${artwork.title} ${artwork.artist}`);
+  const src = `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`;
+  const region = regionLabel(focal);
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      {/* Thumbnail with highlight overlay */}
+      <div className="relative inline-block overflow-hidden rounded border border-neutral-200 shadow-sm" style={{ width: 176 }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={artwork.title}
+          width={176}
+          style={{ display: "block", width: "100%", height: "auto" }}
+        />
+        {/* SVG overlay: viewBox 0 0 1 1 + preserveAspectRatio="none" maps
+            normalized focal coords directly onto the rendered image pixels */}
+        <svg
+          className="pointer-events-none absolute inset-0 h-full w-full rounded"
+          viewBox="0 0 1 1"
+          preserveAspectRatio="none"
+        >
+          <rect
+            x={focal.nx0}
+            y={focal.ny0}
+            width={focal.nx1 - focal.nx0}
+            height={focal.ny1 - focal.ny0}
+            fill="rgba(220,38,38,0.12)"
+            stroke="rgba(220,38,38,0.85)"
+            strokeWidth={0.007}
+          />
+        </svg>
+      </div>
+      {/* Caption */}
+      <p className="max-w-[200px] text-center text-[11px] leading-snug text-neutral-500">
+        Reconstructing:{" "}
+        <span className="font-semibold text-neutral-700">{region}</span> region of{" "}
+        <em>&ldquo;{artwork.title}&rdquo;</em>
+        {artwork.artist ? ` by ${artwork.artist}` : ""}
+      </p>
+    </div>
+  );
+}
+
 // ── React component ───────────────────────────────────────────────────────────
 
 type Props = {
@@ -339,6 +401,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   const userCacheRef = useRef<{ src: HTMLImageElement; canvas: HTMLCanvasElement } | null>(null);
 
   const [pd,         setPd]         = useState<PaintData | null>(null);
+  const [focal,      setFocal]      = useState<FocalBox | null>(null);
   const [statusLine, setStatusLine] = useState("Choose a painting to begin");
   const [isLoading,  setIsLoading]  = useState(false);
 
@@ -376,6 +439,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const dpr = window.devicePixelRatio || 1;
 
     if (!pd) {
+      setFocal(null);
       canvas.width        = CANVAS_W * dpr;
       canvas.height       = 600      * dpr;
       canvas.style.width  = `${CANVAS_W}px`;
@@ -402,6 +466,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     }
 
     if (!userCacheRef.current) {
+      setFocal(null);
       const reconW = Math.round(CANVAS_W * RECON_FRAC);
       const reconH = Math.round(reconW * 0.75);
       const reconX = Math.round((CANVAS_W - reconW) / 2);
@@ -426,7 +491,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       return;
     }
 
-    drawThreadArt(ctx, dpr, pd, userCacheRef.current.canvas, patchCount);
+    const computedFocal = detectSalientRegion(pd.pixels, pd.w, pd.h);
+    setFocal(computedFocal);
+    drawThreadArt(ctx, dpr, pd, userCacheRef.current.canvas, patchCount, computedFocal);
   }, [sourceImage, pd, patchCount, isLoading]);
 
   function handleExport() {
@@ -440,6 +507,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
   return (
     <div className="flex flex-col items-center gap-3">
+      {focal && artwork && (
+        <PaintingLocator focal={focal} artwork={artwork} />
+      )}
       <canvas ref={canvasRef} className="max-w-full rounded shadow-md" />
       <div className="flex w-full max-w-[900px] items-center justify-between px-1">
         <p className="text-xs italic text-neutral-400">{statusLine}</p>
