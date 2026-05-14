@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "import:met": "tsx scripts/importMetArtworks.ts",
+    "build:paintings": "tsx scripts/buildPaintingLibrary.ts"
   },
   "dependencies": {
     "lucide-react": "^1.14.0",
