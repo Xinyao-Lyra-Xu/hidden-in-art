@@ -435,6 +435,7 @@ function fitCenteredText(
 
 // ── Hover magnifier ───────────────────────────────────────────────────────────
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function HoverMagnifier({
   match,
   userCanvas,
@@ -587,8 +588,6 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   const [pd,           setPd]          = useState<PaintData | null>(null);
   const [focal,        setFocal]       = useState<FocalBox | null>(null);
   const [hoverNorm,    setHoverNorm]   = useState<{ nx: number; ny: number } | null>(null);
-  const [hoverMatch,   setHoverMatch]  = useState<GridMatch | null>(null);
-  const [cursorPos,    setCursorPos]   = useState<{ cssX: number; cssY: number } | null>(null);
   const [clickedMatch, setClickedMatch] = useState<ClickedMatchInfo | null>(null);
   const [compareMode,  setCompareMode] = useState(false);
   const [statusLine,   setStatusLine]  = useState("Choose a painting to begin");
@@ -604,20 +603,39 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     setPd(null);
 
     const img = new window.Image();
+    const imageSrc = artwork.image || (() => {
+      const q = artwork.query ?? `${artwork.title} ${artwork.artist}`;
+      return `/api/met-painting?id=${artwork.metId ?? 0}&q=${encodeURIComponent(q)}`;
+    })();
+    if (/^https?:\/\//i.test(imageSrc)) img.crossOrigin = "anonymous";
     img.onload = () => {
       if (cancelled) return;
-      const oc   = makeOffscreen(img, MAX_PX);
-      const octx = oc.getContext("2d")!;
-      const id   = octx.getImageData(0, 0, oc.width, oc.height);
+      let oc: HTMLCanvasElement;
+      let id: ImageData;
+      try {
+        oc = makeOffscreen(img, MAX_PX);
+        const octx = oc.getContext("2d")!;
+        id = octx.getImageData(0, 0, oc.width, oc.height);
+      } catch {
+        setPd(null);
+        console.warn("Target image failed to load:", artwork.title);
+        setStatusLine(`Could not reconstruct "${artwork.title}" because its image blocks canvas access.`);
+        setIsLoading(false);
+        return;
+      }
       setPd({ pixels: new Uint8ClampedArray(id.data), w: oc.width, h: oc.height });
+      console.log("Target image loaded:", artwork.title);
       setStatusLine(`${artwork.title} — ${artwork.artist}`);
       setIsLoading(false);
     };
     img.onerror = () => {
-      if (!cancelled) { setStatusLine(`Failed to load "${artwork.title}"`); setIsLoading(false); }
+      if (!cancelled) {
+        console.warn("Target image failed to load:", artwork.title);
+        setStatusLine(`Failed to load "${artwork.title}"`);
+        setIsLoading(false);
+      }
     };
-    const q = artwork.query ?? `${artwork.title} ${artwork.artist}`;
-    img.src = `/api/met-painting?id=${artwork.metId ?? 0}&q=${encodeURIComponent(q)}`;
+    img.src = imageSrc;
     return () => { cancelled = true; };
   }, [artwork]);
 
@@ -629,7 +647,6 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     setCompareMode(false);
     compareModeRef.current = false;
     setClickedMatch(null);
-    setHoverMatch(null);
     setHoverNorm(null);
 
     const canvas = canvasRef.current;
@@ -945,7 +962,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   // ── Mouse handlers ────────────────────────────────────────────────────────────
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const layout = layoutRef.current;
-    if (!layout) { setHoverNorm(null); setHoverMatch(null); return; }
+    if (!layout) { setHoverNorm(null); return; }
 
     const rect  = e.currentTarget.getBoundingClientRect();
     const scale = CANVAS_W / rect.width;
@@ -967,15 +984,8 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       const fnx = (mx - reconX) / reconW;
       const fny = (my - reconY) / reconH;
       setHoverNorm({ nx: fnx, ny: fny });
-      const phases = phasesRef.current;
-      if (phases) {
-        const m = findClosestMatch(phases.matches, fnx, fny);
-        setHoverMatch(m);
-        setCursorPos({ cssX: e.clientX - rect.left, cssY: e.clientY - rect.top });
-      }
     } else {
       setHoverNorm(null);
-      setHoverMatch(null);
     }
   }, []);
 
@@ -1114,20 +1124,10 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
           onMouseUp={handleMouseUp}
           onMouseLeave={() => {
             setHoverNorm(null);
-            setHoverMatch(null);
             isDraggingRef.current = false;
           }}
           onClick={handleClick}
         />
-        {/* Hover magnifier */}
-        {!compareMode && hoverMatch && cursorPos && phases && (
-          <HoverMagnifier
-            match={hoverMatch}
-            userCanvas={phases.userCanvas}
-            cssX={cursorPos.cssX}
-            cssY={cursorPos.cssY}
-          />
-        )}
         {/* Click-patch popup */}
         {!compareMode && clickedMatch && phases && (
           <PatchPopup

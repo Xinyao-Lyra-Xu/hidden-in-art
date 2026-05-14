@@ -16,9 +16,11 @@ const HISTORY_KEY = "hidden-in-art-history-v1";
 type HistoryItem = {
   key: string;
   photoThumb: string;
+  artworkId?: string;
   artworkTitle: string;
   artworkArtist: string;
   artworkImage: string;
+  artwork?: ArtworkMetadata;
   createdAt: number;
 };
 
@@ -37,15 +39,7 @@ export default function Home() {
   const [userColors,      setUserColors]      = useState<string[]>([]);
   const [photoThumb,      setPhotoThumb]      = useState("");
   const [photoKey,        setPhotoKey]        = useState("");
-  const [history,         setHistory]         = useState<HistoryItem[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const raw = window.localStorage.getItem(HISTORY_KEY);
-      return raw ? (JSON.parse(raw) as HistoryItem[]) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [history,         setHistory]         = useState<HistoryItem[]>([]);
 
   const prevBlobRef = useRef("");
 
@@ -65,6 +59,17 @@ export default function Home() {
     return () => { if (url.startsWith("blob:")) URL.revokeObjectURL(url); };
   }, []);
 
+  useEffect(() => {
+    queueMicrotask(() => {
+      try {
+        const raw = window.localStorage.getItem(HISTORY_KEY);
+        if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
+      } catch {
+        setHistory([]);
+      }
+    });
+  }, []);
+
   function rememberArtwork(
     artwork: ArtworkMetadata,
     nextPhotoThumb = photoThumb,
@@ -78,9 +83,11 @@ export default function Home() {
     const item: HistoryItem = {
       key: `${nextPhotoKey}-${artwork.id}`,
       photoThumb: nextPhotoThumb,
+      artworkId: artwork.id,
       artworkTitle: artwork.title,
       artworkArtist: artwork.artist,
-      artworkImage: `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`,
+      artworkImage: artwork.image || `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`,
+      artwork,
       createdAt: 0,
     };
 
@@ -95,9 +102,31 @@ export default function Home() {
     });
   }
 
-  function selectArtwork(artwork: ArtworkMetadata | null) {
+  function selectArtworkAsTarget(artwork: ArtworkMetadata | null) {
+    if (artwork) console.log("Selected artwork target:", artwork.title);
     setSelectedArtwork(artwork);
     if (artwork) rememberArtwork(artwork);
+  }
+
+  function artworkFromHistory(item: HistoryItem): ArtworkMetadata {
+    const found = artworks.find((artwork) =>
+      artwork.id === item.artworkId ||
+      (artwork.title === item.artworkTitle && artwork.artist === item.artworkArtist)
+    );
+    if (found) return found;
+    if (item.artwork) return item.artwork;
+    return {
+      id: item.artworkId ?? `history-${item.key}`,
+      title: item.artworkTitle,
+      artist: item.artworkArtist,
+      image: item.artworkImage,
+      tags: [],
+      palette: [],
+    };
+  }
+
+  function handleHistorySelect(item: HistoryItem) {
+    selectArtworkAsTarget(artworkFromHistory(item));
   }
 
   async function handleFile(file: File) {
@@ -122,7 +151,7 @@ export default function Home() {
         const recs = recommendArtworks(analysis, artworks, 5);
         setRecommendations(recs);
         if (recs.length > 0) {
-          setSelectedArtwork(recs[0].artwork);
+          selectArtworkAsTarget(recs[0].artwork);
           rememberArtwork(recs[0].artwork, nextPhotoThumb, nextPhotoKey);
         } else if (selectedArtwork) {
           rememberArtwork(selectedArtwork, nextPhotoThumb, nextPhotoKey);
@@ -144,10 +173,11 @@ export default function Home() {
     const choices = available.length > 0 ? available : pool;
     const currentIndex = choices.findIndex((a) => a.id === selectedArtwork?.id);
     const next = choices[(currentIndex + 1 + choices.length) % choices.length];
-    selectArtwork(next);
+    selectArtworkAsTarget(next);
   }
 
   const thumbnailSrc = (a: ArtworkMetadata) => {
+    if (a.thumbnail || a.image) return a.thumbnail ?? a.image ?? "";
     const q = encodeURIComponent(a.query ?? `${a.title} ${a.artist}`);
     return `/api/met-painting?id=${a.metId ?? 0}&q=${q}`;
   };
@@ -192,11 +222,14 @@ export default function Home() {
                   return (
                     <button
                       key={artwork.id}
-                      onClick={() => selectArtwork(artwork)}
-                      className={`group relative flex flex-col overflow-hidden rounded border text-left transition focus:outline-none ${
+                      type="button"
+                      aria-pressed={isSelected}
+                      title={`Use ${artwork.title} as the reconstruction target`}
+                      onClick={() => selectArtworkAsTarget(artwork)}
+                      className={`group relative flex cursor-pointer flex-col overflow-hidden rounded border text-left transition focus:outline-none focus:ring-2 focus:ring-neutral-700 ${
                         isSelected
-                          ? "border-neutral-700 ring-2 ring-neutral-700"
-                          : "border-neutral-200 hover:border-neutral-400"
+                          ? "border-neutral-800 bg-white ring-2 ring-neutral-700"
+                          : "border-neutral-200 bg-white/70 hover:border-neutral-500 hover:bg-white"
                       }`}
                     >
                       <div className="relative aspect-square w-full overflow-hidden bg-neutral-100">
@@ -210,6 +243,11 @@ export default function Home() {
                         <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1 py-0.5 text-[10px] font-medium text-white">
                           {score}%
                         </span>
+                        {isSelected && (
+                          <span className="absolute left-1 top-1 rounded bg-white/90 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-neutral-800">
+                            Target
+                          </span>
+                        )}
                       </div>
                       <div className="p-1.5">
                         <p className="truncate text-[11px] font-medium leading-tight text-neutral-800">
@@ -223,6 +261,13 @@ export default function Home() {
                   );
                 })}
               </div>
+              {selectedArtwork && (
+                <p className="mt-3 text-xs text-neutral-500">
+                  Reconstructing with{" "}
+                  <span className="font-medium text-neutral-700">{selectedArtwork.title}</span>.
+                  Click another match to rerun with that artwork.
+                </p>
+              )}
             </div>
           )}
 
@@ -245,7 +290,7 @@ export default function Home() {
                   value={selectedArtwork?.id ?? ""}
                   onChange={(e) => {
                     const a = artworks.find((x) => x.id === e.target.value) ?? null;
-                    selectArtwork(a);
+                    selectArtworkAsTarget(a);
                   }}
                   className="w-full rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 focus:outline-none focus:ring-1 focus:ring-neutral-400"
                 >
@@ -311,7 +356,11 @@ export default function Home() {
           patchCount={patchCount}
         />
 
-        <HistoryGallery items={history} />
+        <HistoryGallery
+          items={history}
+          selectedArtwork={selectedArtwork}
+          onSelect={handleHistorySelect}
+        />
 
       </section>
     </main>
@@ -434,7 +483,15 @@ function ActionStrip({
   );
 }
 
-function HistoryGallery({ items }: { items: HistoryItem[] }) {
+function HistoryGallery({
+  items,
+  selectedArtwork,
+  onSelect,
+}: {
+  items: HistoryItem[];
+  selectedArtwork: ArtworkMetadata | null;
+  onSelect: (item: HistoryItem) => void;
+}) {
   if (items.length === 0) return null;
 
   return (
@@ -446,27 +503,53 @@ function HistoryGallery({ items }: { items: HistoryItem[] }) {
         </h2>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-        {items.map((item) => (
-          <article
-            key={item.key}
-            className="overflow-hidden rounded border border-neutral-200 bg-white/70 shadow-sm"
-          >
-            <div className="grid aspect-[4/3] grid-cols-2 bg-neutral-100">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={item.photoThumb} alt="" className="h-full w-full object-cover" />
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={item.artworkImage}
-                alt={item.artworkTitle}
-                className="h-full w-full object-cover"
-              />
-            </div>
-            <div className="p-3">
-              <p className="truncate font-serif text-sm text-neutral-900">{item.artworkTitle}</p>
-              <p className="truncate text-xs text-neutral-500">{item.artworkArtist}</p>
-            </div>
-          </article>
-        ))}
+        {items.map((item) => {
+          const isSelected =
+            selectedArtwork?.id === item.artworkId ||
+            (selectedArtwork?.title === item.artworkTitle &&
+              selectedArtwork?.artist === item.artworkArtist);
+          return (
+            <article
+              key={item.key}
+              role="button"
+              tabIndex={0}
+              aria-pressed={isSelected}
+              title={`Use ${item.artworkTitle} as the reconstruction target`}
+              onClick={() => onSelect(item)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect(item);
+                }
+              }}
+              className={`overflow-hidden rounded border shadow-sm transition focus:outline-none focus:ring-2 focus:ring-neutral-700 ${
+                isSelected
+                  ? "cursor-pointer border-neutral-800 bg-white ring-2 ring-neutral-700"
+                  : "cursor-pointer border-neutral-200 bg-white/70 hover:border-neutral-500 hover:bg-white"
+              }`}
+            >
+              <div className="relative grid aspect-[4/3] grid-cols-2 bg-neutral-100">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={item.photoThumb} alt="" className="h-full w-full object-cover" />
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={item.artworkImage}
+                  alt={item.artworkTitle}
+                  className="h-full w-full object-cover"
+                />
+                {isSelected && (
+                  <span className="absolute left-2 top-2 rounded bg-white/90 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-800">
+                    Target
+                  </span>
+                )}
+              </div>
+              <div className="p-3">
+                <p className="truncate font-serif text-sm text-neutral-900">{item.artworkTitle}</p>
+                <p className="truncate text-xs text-neutral-500">{item.artworkArtist}</p>
+              </div>
+            </article>
+          );
+        })}
       </div>
     </section>
   );
