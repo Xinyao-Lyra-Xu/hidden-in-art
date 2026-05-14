@@ -1,14 +1,26 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Upload } from "lucide-react";
+import { History, Shuffle, Upload } from "lucide-react";
 import CanvasRenderer from "@/components/CanvasRenderer";
+import ArtworkInfoCard from "@/components/ArtworkInfoCard";
 import { loadImageFromFile } from "@/lib/image/loadImage";
 import { loadLocalArtworks } from "@/lib/artwork/loadArtworks";
 import { analyzeImage } from "@/lib/artwork/analyzeImage";
 import { recommendArtworks } from "@/lib/artwork/matcher";
 import type { ArtworkMetadata } from "@/types/art";
 import type { ArtworkRecommendation } from "@/lib/artwork/matcher";
+
+const HISTORY_KEY = "hidden-in-art-history-v1";
+
+type HistoryItem = {
+  key: string;
+  photoThumb: string;
+  artworkTitle: string;
+  artworkArtist: string;
+  artworkImage: string;
+  createdAt: number;
+};
 
 export default function Home() {
   const [artworks,        setArtworks]        = useState<ArtworkMetadata[]>([]);
@@ -22,6 +34,18 @@ export default function Home() {
   const [recommendations, setRecommendations] = useState<ArtworkRecommendation[]>([]);
   const [selectedArtwork, setSelectedArtwork] = useState<ArtworkMetadata | null>(null);
   const [patchCount,      setPatchCount]      = useState(2500);
+  const [userColors,      setUserColors]      = useState<string[]>([]);
+  const [photoThumb,      setPhotoThumb]      = useState("");
+  const [photoKey,        setPhotoKey]        = useState("");
+  const [history,         setHistory]         = useState<HistoryItem[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(HISTORY_KEY);
+      return raw ? (JSON.parse(raw) as HistoryItem[]) : [];
+    } catch {
+      return [];
+    }
+  });
 
   const prevBlobRef = useRef("");
 
@@ -41,6 +65,41 @@ export default function Home() {
     return () => { if (url.startsWith("blob:")) URL.revokeObjectURL(url); };
   }, []);
 
+  function rememberArtwork(
+    artwork: ArtworkMetadata,
+    nextPhotoThumb = photoThumb,
+    nextPhotoKey = photoKey,
+  ) {
+    if (!nextPhotoThumb || !nextPhotoKey) return;
+
+    const q = encodeURIComponent(
+      artwork.query ?? `${artwork.title} ${artwork.artist}`,
+    );
+    const item: HistoryItem = {
+      key: `${nextPhotoKey}-${artwork.id}`,
+      photoThumb: nextPhotoThumb,
+      artworkTitle: artwork.title,
+      artworkArtist: artwork.artist,
+      artworkImage: `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`,
+      createdAt: 0,
+    };
+
+    setHistory((prev) => {
+      const next = [item, ...prev.filter((x) => x.key !== item.key)].slice(0, 12);
+      try {
+        window.localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+      } catch {
+        // Ignore private-mode or quota failures; the gallery is a nice-to-have.
+      }
+      return next;
+    });
+  }
+
+  function selectArtwork(artwork: ArtworkMetadata | null) {
+    setSelectedArtwork(artwork);
+    if (artwork) rememberArtwork(artwork);
+  }
+
   async function handleFile(file: File) {
     setIsProcessing(true);
     try {
@@ -52,19 +111,40 @@ export default function Home() {
 
       const img = await loadImageFromFile(file);
       setSourceImage(img);
+      const nextPhotoThumb = makePhotoThumb(img);
+      const nextPhotoKey = `${file.name}-${file.size}-${file.lastModified}`;
+      setPhotoThumb(nextPhotoThumb);
+      setPhotoKey(nextPhotoKey);
 
-      // Auto-match against the loaded painting library
       if (artworks.length > 0) {
         const analysis = analyzeImage(img);
+        setUserColors(analysis.dominantColors);
         const recs = recommendArtworks(analysis, artworks, 5);
         setRecommendations(recs);
-        if (recs.length > 0) setSelectedArtwork(recs[0].artwork);
+        if (recs.length > 0) {
+          setSelectedArtwork(recs[0].artwork);
+          rememberArtwork(recs[0].artwork, nextPhotoThumb, nextPhotoKey);
+        } else if (selectedArtwork) {
+          rememberArtwork(selectedArtwork, nextPhotoThumb, nextPhotoKey);
+        }
       }
     } catch {
       alert("Failed to load image.");
     } finally {
       setIsProcessing(false);
     }
+  }
+
+  function selectRandomArtwork() {
+    const pool = recommendations.length > 0
+      ? recommendations.map((r) => r.artwork)
+      : artworks;
+    if (pool.length === 0) return;
+    const available = pool.filter((a) => a.id !== selectedArtwork?.id);
+    const choices = available.length > 0 ? available : pool;
+    const currentIndex = choices.findIndex((a) => a.id === selectedArtwork?.id);
+    const next = choices[(currentIndex + 1 + choices.length) % choices.length];
+    selectArtwork(next);
   }
 
   const thumbnailSrc = (a: ArtworkMetadata) => {
@@ -112,14 +192,13 @@ export default function Home() {
                   return (
                     <button
                       key={artwork.id}
-                      onClick={() => setSelectedArtwork(artwork)}
+                      onClick={() => selectArtwork(artwork)}
                       className={`group relative flex flex-col overflow-hidden rounded border text-left transition focus:outline-none ${
                         isSelected
                           ? "border-neutral-700 ring-2 ring-neutral-700"
                           : "border-neutral-200 hover:border-neutral-400"
                       }`}
                     >
-                      {/* Thumbnail */}
                       <div className="relative aspect-square w-full overflow-hidden bg-neutral-100">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
@@ -128,12 +207,10 @@ export default function Home() {
                           loading="lazy"
                           className="h-full w-full object-cover"
                         />
-                        {/* Score badge */}
                         <span className="absolute bottom-1 right-1 rounded bg-black/60 px-1 py-0.5 text-[10px] font-medium text-white">
                           {score}%
                         </span>
                       </div>
-                      {/* Label */}
                       <div className="p-1.5">
                         <p className="truncate text-[11px] font-medium leading-tight text-neutral-800">
                           {artwork.title}
@@ -168,7 +245,7 @@ export default function Home() {
                   value={selectedArtwork?.id ?? ""}
                   onChange={(e) => {
                     const a = artworks.find((x) => x.id === e.target.value) ?? null;
-                    setSelectedArtwork(a);
+                    selectArtwork(a);
                   }}
                   className="w-full rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 focus:outline-none focus:ring-1 focus:ring-neutral-400"
                 >
@@ -191,13 +268,50 @@ export default function Home() {
             step={100}
             onChange={setPatchCount}
           />
+
+          {sourceImage && (
+            <ActionStrip
+              onTryPhoto={() => document.getElementById("photo-upload")?.click()}
+              onTryArtwork={selectRandomArtwork}
+              canTryArtwork={artworks.length > 1}
+            />
+          )}
         </div>
+
+        {/* Scroll guide — appears after upload to direct attention downward */}
+        {sourceImage && selectedArtwork && (
+          <p className="text-center text-sm text-neutral-500">
+            ↓ Scroll down to see how{" "}
+            <span className="font-medium text-neutral-700">{selectedArtwork.artist}</span>{" "}
+            would have painted with your pixels
+          </p>
+        )}
+
+        {selectedArtwork && (
+          <ArtworkInfoCard
+            artwork={selectedArtwork}
+            recommendation={
+              recommendations.find((r) => r.artwork.id === selectedArtwork.id) ?? null
+            }
+          />
+        )}
+
+        {/* Color palette comparison — shown once user photo is available */}
+        {sourceImage && selectedArtwork && userColors.length > 0 && (
+          <PaletteCard
+            artworkPalette={selectedArtwork.palette ?? []}
+            userColors={userColors}
+            artwork={selectedArtwork}
+          />
+        )}
 
         <CanvasRenderer
           sourceImage={sourceImage}
           artwork={selectedArtwork}
           patchCount={patchCount}
         />
+
+        <HistoryGallery items={history} />
 
       </section>
     </main>
@@ -285,5 +399,146 @@ function Slider({
         className="mt-2 w-full accent-neutral-700"
       />
     </label>
+  );
+}
+
+function ActionStrip({
+  onTryPhoto,
+  onTryArtwork,
+  canTryArtwork,
+}: {
+  onTryPhoto: () => void;
+  onTryArtwork: () => void;
+  canTryArtwork: boolean;
+}) {
+  return (
+    <div className="mt-5 grid grid-cols-1 gap-2 border-t border-neutral-200 pt-5 sm:grid-cols-2">
+      <button
+        type="button"
+        onClick={onTryPhoto}
+        className="inline-flex items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition hover:bg-neutral-50"
+      >
+        <Upload className="h-4 w-4" />
+        Try another photo
+      </button>
+      <button
+        type="button"
+        onClick={onTryArtwork}
+        disabled={!canTryArtwork}
+        className="inline-flex items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition hover:bg-neutral-50 disabled:opacity-40"
+      >
+        <Shuffle className="h-4 w-4" />
+        Try another painting
+      </button>
+    </div>
+  );
+}
+
+function HistoryGallery({ items }: { items: HistoryItem[] }) {
+  if (items.length === 0) return null;
+
+  return (
+    <section className="w-full">
+      <div className="mb-3 flex items-center gap-2">
+        <History className="h-4 w-4 text-neutral-500" />
+        <h2 className="text-xs font-semibold uppercase tracking-widest text-neutral-500">
+          Personal Gallery
+        </h2>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {items.map((item) => (
+          <article
+            key={item.key}
+            className="overflow-hidden rounded border border-neutral-200 bg-white/70 shadow-sm"
+          >
+            <div className="grid aspect-[4/3] grid-cols-2 bg-neutral-100">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={item.photoThumb} alt="" className="h-full w-full object-cover" />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={item.artworkImage}
+                alt={item.artworkTitle}
+                className="h-full w-full object-cover"
+              />
+            </div>
+            <div className="p-3">
+              <p className="truncate font-serif text-sm text-neutral-900">{item.artworkTitle}</p>
+              <p className="truncate text-xs text-neutral-500">{item.artworkArtist}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function makePhotoThumb(img: HTMLImageElement): string {
+  const maxSide = 360;
+  const scale = Math.min(maxSide / img.width, maxSide / img.height, 1);
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(img.width * scale));
+  canvas.height = Math.max(1, Math.round(img.height * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return "";
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.72);
+}
+
+function PaletteCard({
+  artworkPalette,
+  userColors,
+  artwork,
+}: {
+  artworkPalette: string[];
+  userColors:     string[];
+  artwork:        ArtworkMetadata;
+}) {
+  const artSwatches  = artworkPalette.slice(0, 5);
+  const userSwatches = userColors.slice(0, 5);
+
+  if (artSwatches.length === 0 && userSwatches.length === 0) return null;
+
+  return (
+    <div className="w-full rounded border border-neutral-200 bg-white/70 p-4 shadow-sm backdrop-blur">
+      <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-neutral-500">
+        Color Palette Match
+      </p>
+      <div className="flex gap-6">
+        {artSwatches.length > 0 && (
+          <div className="flex-1">
+            <p className="mb-1.5 truncate text-[11px] text-neutral-400">{artwork.title}</p>
+            <div className="flex gap-1">
+              {artSwatches.map((hex, i) => (
+                <div
+                  key={i}
+                  className="h-8 flex-1 rounded"
+                  style={{ backgroundColor: hex }}
+                  title={hex}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        {userSwatches.length > 0 && (
+          <div className="flex-1">
+            <p className="mb-1.5 text-[11px] text-neutral-400">Your Photo</p>
+            <div className="flex gap-1">
+              {userSwatches.map((hex, i) => (
+                <div
+                  key={i}
+                  className="h-8 flex-1 rounded"
+                  style={{ backgroundColor: hex }}
+                  title={hex}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      <p className="mt-2 text-[11px] leading-relaxed text-neutral-400">
+        The reconstruction maps each patch to the closest color in your photo, so similar tones
+        transfer naturally while the painting&apos;s overall palette stays recognizable.
+      </p>
+    </div>
   );
 }

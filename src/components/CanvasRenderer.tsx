@@ -1,28 +1,34 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Image as ImageIcon } from "lucide-react";
 import type { ArtworkMetadata } from "@/types/art";
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const CANVAS_W    = 900;
 const TOP_PAD     = 52;
-const RECON_FRAC  = 0.55;   // reconstruction width ~495 px
-const THREAD_GAP  = 80;
-const USER_MAX_H  = 480;
+const RECON_FRAC  = 0.55;
+const THREAD_GAP  = 36;
+const USER_MAX_H  = 300;
 const BOTTOM_PAD  = 28;
 const MAX_PX      = 900;
-const FOCAL_SCAN  = 20;     // 20×20 saliency scan
-const FOCAL_FRAC  = 0.30;   // focal crop: 30% of painting dimension per axis (~9% area)
-const COLOR_GRID  = 64;     // 64×64 = 4096 color candidates from user photo
-const MAX_THREADS = 120;    // max connecting lines drawn
-const DOT_R_USER  = 2;      // radius of sampling markers on user photo
+const FOCAL_SCAN  = 20;
+const FOCAL_FRAC  = 0.30;
+const COLOR_GRID  = 64;
+const MAX_THREADS = 120;
+const DOT_R_USER  = 2;
+
+// Reveal-animation timing (ms)
+const PHASE1_HOLD = 700;
+const PHASE_FADE  = 900;
+
+// Magnifier
+const LENS_DIAM = 140;
+const LENS_R    = LENS_DIAM / 2;
+const ZOOM      = 5;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type PaintData = {
-  pixels: Uint8ClampedArray;
-  w:      number;
-  h:      number;
-};
+type PaintData = { pixels: Uint8ClampedArray; w: number; h: number };
 
 type FocalBox = { nx0: number; ny0: number; nx1: number; ny1: number };
 
@@ -34,9 +40,20 @@ type GridMatch = {
   r: number; g: number; b: number;
 };
 
+type ReconLayout = { reconX: number; reconY: number; reconW: number; reconH: number };
+
+type PhasesData = {
+  p1: HTMLCanvasElement;
+  p3: HTMLCanvasElement;
+  matches: GridMatch[];
+  userCanvas: HTMLCanvasElement;
+  patchR: number;
+};
+
+type ClickedMatchInfo = { match: GridMatch; cssX: number; cssY: number };
+
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
-// Fast integer hash — replaces Math.sin-based jitter in the hot inner loop
 function fastRand(a: number, b: number): number {
   let x = ((a * 12347 + b * 17911) ^ (a << 5)) >>> 0;
   x ^= x >>> 16;
@@ -82,9 +99,18 @@ function avgRgb(
   return n > 0 ? [r / n, g / n, b / n] : [128, 128, 128];
 }
 
+function findClosestMatch(matches: GridMatch[], fnx: number, fny: number): GridMatch | null {
+  if (matches.length === 0) return null;
+  let best = matches[0];
+  let bestD = (best.focalNx - fnx) ** 2 + (best.focalNy - fny) ** 2;
+  for (const m of matches) {
+    const d = (m.focalNx - fnx) ** 2 + (m.focalNy - fny) ** 2;
+    if (d < bestD) { bestD = d; best = m; }
+  }
+  return best;
+}
+
 // ── Saliency detection ────────────────────────────────────────────────────────
-// Finds the most visually rich region; adds gentle center-bias so face/subject
-// regions score higher than equally-varied corners/backgrounds.
 
 function detectSalientRegion(px: Uint8ClampedArray, w: number, h: number): FocalBox {
   const cw = w / FOCAL_SCAN;
@@ -111,12 +137,10 @@ function detectSalientRegion(px: Uint8ClampedArray, w: number, h: number): Focal
           const dr = px[i] - mr, dg = px[i + 1] - mg, db = px[i + 2] - mb;
           v += dr * dr + dg * dg + db * db;
         }
-      // Gentle center bias: cells near center of painting score slightly higher
       const ncx = (gx + 0.5) / FOCAL_SCAN - 0.5;
       const ncy = (gy + 0.5) / FOCAL_SCAN - 0.5;
       const centerBonus = (1 - Math.sqrt(ncx * ncx + ncy * ncy) / 0.7) * v * 0.15;
-      const score = v + centerBonus;
-      if (score > bestScore) { bestScore = score; bestGx = gx; bestGy = gy; }
+      if (v + centerBonus > bestScore) { bestScore = v + centerBonus; bestGx = gx; bestGy = gy; }
     }
   }
 
@@ -132,11 +156,8 @@ function detectSalientRegion(px: Uint8ClampedArray, w: number, h: number): Focal
 }
 
 // ── Color index ───────────────────────────────────────────────────────────────
-function buildColorIndex(
-  px: Uint8ClampedArray,
-  w: number,
-  h: number,
-): ColorCandidate[] {
+
+function buildColorIndex(px: Uint8ClampedArray, w: number, h: number): ColorCandidate[] {
   const out: ColorCandidate[] = [];
   for (let gy = 0; gy < COLOR_GRID; gy++)
     for (let gx = 0; gx < COLOR_GRID; gx++) {
@@ -151,6 +172,7 @@ function buildColorIndex(
 }
 
 // ── Grid matching ─────────────────────────────────────────────────────────────
+
 function computeGridMatches(
   paintPx: Uint8ClampedArray,
   paintW:  number,
@@ -166,15 +188,13 @@ function computeGridMatches(
   const rows    = Math.max(4, Math.round(patchCount / cols));
   const MAX_DSQ = 3 * 255 * 255;
   const matches: GridMatch[] = [];
-
-  const cellW = focalW * paintW / cols;
-  const cellH = focalH * paintH / rows;
+  const cellW   = focalW * paintW / cols;
+  const cellH   = focalH * paintH / rows;
 
   for (let gy = 0; gy < rows; gy++) {
     for (let gx = 0; gx < cols; gx++) {
       const fnx = (gx + 0.5) / cols;
       const fny = (gy + 0.5) / rows;
-
       const pnx = focal.nx0 + fnx * focalW;
       const pny = focal.ny0 + fny * focalH;
       const px0 = pnx * paintW - cellW / 2;
@@ -185,145 +205,363 @@ function computeGridMatches(
       for (let ci = 0; ci < candidates.length; ci++) {
         const c  = candidates[ci];
         const dr = c.r - tr, dg = c.g - tg, db = c.b - tb;
-        // Small jitter breaks ties; use fast integer hash (no Math.sin)
         const jitter = fastRand(gx * 31 + gy, ci) * MAX_DSQ * 0.018;
         const d = dr * dr + dg * dg + db * db + jitter;
         if (d < bestDist) { bestDist = d; bestIdx = ci; }
       }
-
       const best = candidates[bestIdx];
       matches.push({
         focalNx: fnx, focalNy: fny,
-        userNx:  best.nx, userNy: best.ny,
+        userNx: best.nx, userNy: best.ny,
         r: best.r, g: best.g, b: best.b,
       });
     }
   }
-
   return { matches, cols, rows };
 }
 
-// ── Main draw routine ─────────────────────────────────────────────────────────
-function drawThreadArt(
-  ctx:        CanvasRenderingContext2D,
-  dpr:        number,
-  pd:         PaintData,
-  userCanvas: HTMLCanvasElement,
-  patchCount: number,
-) {
-  const focal  = detectSalientRegion(pd.pixels, pd.w, pd.h);
+// ── Phase pre-rendering ───────────────────────────────────────────────────────
+
+function makePhase1(pd: PaintData, focal: FocalBox, rW: number, rH: number): HTMLCanvasElement {
+  const paintC = document.createElement("canvas");
+  paintC.width = pd.w; paintC.height = pd.h;
+  paintC.getContext("2d")!
+    .putImageData(new ImageData(new Uint8ClampedArray(pd.pixels), pd.w), 0, 0);
+
+  const c = document.createElement("canvas");
+  c.width = rW; c.height = rH;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, rW, rH);
+  ctx.drawImage(
+    paintC,
+    focal.nx0 * pd.w,
+    focal.ny0 * pd.h,
+    (focal.nx1 - focal.nx0) * pd.w,
+    (focal.ny1 - focal.ny0) * pd.h,
+    0, 0, rW, rH,
+  );
+  return c;
+}
+
+function makePhase2(
+  pd: PaintData,
+  focal: FocalBox,
+  cols: number, rows: number,
+  rW: number, rH: number,
+  patchR: number,
+): HTMLCanvasElement {
   const focalW = focal.nx1 - focal.nx0;
   const focalH = focal.ny1 - focal.ny0;
+  const cellW  = focalW * pd.w / cols;
+  const cellH  = focalH * pd.h / rows;
 
-  // --- Layout (logical pixels) ------------------------------------------------
-  const reconW = Math.round(CANVAS_W * RECON_FRAC);
-  const reconH = Math.round(reconW * focalH / focalW);
-  const reconX = Math.round((CANVAS_W - reconW) / 2);
-  const reconY = TOP_PAD;
+  const c = document.createElement("canvas");
+  c.width = rW; c.height = rH;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, rW, rH);
 
-  const uAspect = userCanvas.height / userCanvas.width;
-  const userH   = Math.min(USER_MAX_H, Math.round(CANVAS_W * uAspect));
-  const userY   = reconY + reconH + THREAD_GAP;
-  const canvasH = userY + userH + BOTTOM_PAD;
-
-  // Retina: physical canvas = logical × dpr; CSS size = logical px
-  ctx.canvas.width        = CANVAS_W * dpr;
-  ctx.canvas.height       = canvasH  * dpr;
-  ctx.canvas.style.width  = `${CANVAS_W}px`;
-  ctx.canvas.style.height = `${canvasH}px`;
-  ctx.scale(dpr, dpr);
-
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, CANVAS_W, canvasH);
-
-  // --- User photo (bottom, center-cropped to fill CANVAS_W × userH) ----------
-  const uScale = Math.max(CANVAS_W / userCanvas.width, userH / userCanvas.height);
-  const uVisW  = CANVAS_W / uScale;
-  const uVisH  = userH    / uScale;
-  const uCropX = (userCanvas.width  - uVisW) / 2;
-  const uCropY = (userCanvas.height - uVisH) / 2;
-  ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
-
-  // --- Build color index -------------------------------------------------------
-  const uCtx = userCanvas.getContext("2d")!;
-  const uPx  = uCtx.getImageData(0, 0, userCanvas.width, userCanvas.height).data;
-  const candidates = buildColorIndex(uPx, userCanvas.width, userCanvas.height);
-
-  // --- Compute grid matches ----------------------------------------------------
-  const { matches, cols, rows } = computeGridMatches(
-    pd.pixels, pd.w, pd.h, focal, candidates, patchCount,
-  );
-
-  // Dot radius: 56% of cell half-size → adjacent dots overlap ~12%, no white gaps
-  const cellDispW  = reconW / cols;
-  const cellDispH  = reconH / rows;
-  const patchDispR = Math.max(1.0, Math.min(cellDispW, cellDispH) * 0.56);
-
-  // Map normalized user-photo coords → screen position in bottom photo area
-  const toScreen = (nx: number, ny: number): [number, number] => [
-    ((nx * userCanvas.width  - uCropX) / uVisW) * CANVAS_W,
-    userY + ((ny * userCanvas.height - uCropY) / uVisH) * userH,
-  ];
-
-  const inUserArea = (ux: number, uy: number) =>
-    ux >= 0 && ux <= CANVAS_W && uy >= userY && uy <= userY + userH;
-
-  type Pt = { rx: number; ry: number; ux: number; uy: number };
-  const pts: Pt[] = matches.map((m) => {
-    const [ux, uy] = toScreen(m.userNx, m.userNy);
-    return { rx: reconX + m.focalNx * reconW, ry: reconY + m.focalNy * reconH, ux, uy };
-  });
-
-  // --- Thread subset: evenly spaced, capped at MAX_THREADS --------------------
-  const validPts  = pts.filter((p) => inUserArea(p.ux, p.uy));
-  const threadStep = Math.max(1, Math.floor(validPts.length / MAX_THREADS));
-  const threadPts  = validPts.filter((_, i) => i % threadStep === 0).slice(0, MAX_THREADS);
-
-  // --- 1. Threads (behind everything) ----------------------------------------
-  ctx.save();
-  ctx.strokeStyle = "rgba(110,100,90,0.28)";
-  ctx.lineWidth   = 0.65;
-  for (const p of threadPts) {
-    ctx.beginPath();
-    ctx.moveTo(p.ux, p.uy);
-    ctx.lineTo(p.rx, p.ry);
-    ctx.stroke();
+  for (let gy = 0; gy < rows; gy++) {
+    for (let gx = 0; gx < cols; gx++) {
+      const fnx = (gx + 0.5) / cols;
+      const fny = (gy + 0.5) / rows;
+      const pnx = focal.nx0 + fnx * focalW;
+      const pny = focal.ny0 + fny * focalH;
+      const px0 = pnx * pd.w - cellW / 2;
+      const py0 = pny * pd.h - cellH / 2;
+      const [r, g, b] = avgRgb(pd.pixels, pd.w, pd.h, px0, py0, px0 + cellW, py0 + cellH);
+      ctx.beginPath();
+      ctx.arc(fnx * rW, fny * rH, patchR, 0, Math.PI * 2);
+      ctx.fillStyle = `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
+      ctx.fill();
+    }
   }
-  ctx.restore();
+  return c;
+}
 
-  // --- 2. Circular patches in reconstruction (user photo fragments) -----------
-  for (let i = 0; i < matches.length; i++) {
-    const m = matches[i];
-    const p = pts[i];
+function makePhase3(
+  matches:    GridMatch[],
+  userCanvas: HTMLCanvasElement,
+  rW: number, rH: number,
+  patchR: number,
+): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = rW; c.height = rH;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, rW, rH);
+
+  for (const m of matches) {
+    const cx = m.focalNx * rW;
+    const cy = m.focalNy * rH;
     ctx.save();
     ctx.beginPath();
-    ctx.arc(p.rx, p.ry, patchDispR, 0, Math.PI * 2);
+    ctx.arc(cx, cy, patchR, 0, Math.PI * 2);
     ctx.clip();
-    // Source radius in user-canvas pixels; 1:1 mapping shows real photo texture
-    const srcR = Math.max(1.5, patchDispR);
+    const srcR = Math.max(1.5, patchR);
     ctx.drawImage(
       userCanvas,
       m.userNx * userCanvas.width  - srcR,
       m.userNy * userCanvas.height - srcR,
       srcR * 2, srcR * 2,
-      p.rx - patchDispR, p.ry - patchDispR,
-      patchDispR * 2, patchDispR * 2,
+      cx - patchR, cy - patchR,
+      patchR * 2, patchR * 2,
     );
     ctx.restore();
   }
+  return c;
+}
 
-  // --- 3. Small sampling markers on user photo (only for thread endpoints) ---
+// ── Painting locator ──────────────────────────────────────────────────────────
+
+function regionLabel(f: FocalBox): string {
+  const cx = (f.nx0 + f.nx1) / 2;
+  const cy = (f.ny0 + f.ny1) / 2;
+  const h  = cx < 0.33 ? "left"  : cx > 0.67 ? "right"  : "";
+  const v  = cy < 0.33 ? "top"   : cy > 0.67 ? "bottom" : "";
+  if (v && h) return `${v}-${h}`;
+  return v || h || "center";
+}
+
+function PaintingLocator({
+  focal,
+  artwork,
+  hoverNorm,
+}: {
+  focal:     FocalBox;
+  artwork:   ArtworkMetadata;
+  hoverNorm: { nx: number; ny: number } | null;
+}) {
+  const q   = encodeURIComponent(artwork.query ?? `${artwork.title} ${artwork.artist}`);
+  const src = `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`;
+
+  const hx = hoverNorm !== null
+    ? focal.nx0 + hoverNorm.nx * (focal.nx1 - focal.nx0)
+    : null;
+  const hy = hoverNorm !== null
+    ? focal.ny0 + hoverNorm.ny * (focal.ny1 - focal.ny0)
+    : null;
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <div
+        className="relative inline-block overflow-hidden rounded border border-neutral-200 shadow-sm"
+        style={{ width: 176 }}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={src}
+          alt={artwork.title}
+          width={176}
+          style={{ display: "block", width: "100%", height: "auto" }}
+        />
+        <svg
+          className="pointer-events-none absolute inset-0 h-full w-full rounded"
+          viewBox="0 0 1 1"
+          preserveAspectRatio="none"
+        >
+          <rect
+            x={focal.nx0}
+            y={focal.ny0}
+            width={focal.nx1 - focal.nx0}
+            height={focal.ny1 - focal.ny0}
+            fill="rgba(220,38,38,0.12)"
+            stroke="rgba(220,38,38,0.85)"
+            strokeWidth={0.007}
+          />
+          {hx !== null && hy !== null && (
+            <circle cx={hx} cy={hy} r={0.018} fill="rgba(220,38,38,0.85)" />
+          )}
+        </svg>
+      </div>
+      <p className="max-w-[200px] text-center text-[11px] leading-snug text-neutral-500">
+        Reconstructing:{" "}
+        <span className="font-semibold text-neutral-700">{regionLabel(focal)}</span>{" "}
+        region of <em>&ldquo;{artwork.title}&rdquo;</em>
+        {artwork.artist ? ` by ${artwork.artist}` : ""}
+      </p>
+    </div>
+  );
+}
+
+function drawSharePanel(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  label: string,
+) {
   ctx.save();
-  for (const p of threadPts) {
-    ctx.beginPath();
-    ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
-    ctx.fillStyle   = "rgba(255,255,255,0.85)";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.20)";
-    ctx.lineWidth   = 0.6;
-    ctx.stroke();
-  }
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = "rgba(23,23,23,0.14)";
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  const imageY = y + 48;
+  const imageH = h - 48;
+  const scale = Math.max(w / source.width, imageH / source.height);
+  const sw = w / scale;
+  const sh = imageH / scale;
+  const sx = (source.width - sw) / 2;
+  const sy = (source.height - sh) / 2;
+  ctx.drawImage(source, sx, sy, sw, sh, x, imageY, w, imageH);
+
+  ctx.fillStyle = "#171717";
+  ctx.font = "bold 18px Arial, sans-serif";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + 22, y + 25);
   ctx.restore();
+}
+
+function fitCenteredText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxW: number,
+  fontSize: number,
+) {
+  let size = fontSize;
+  while (size > 18 && ctx.measureText(text).width > maxW) {
+    size -= 2;
+    ctx.font = `${size}px Georgia, serif`;
+  }
+  ctx.fillText(text, x, y);
+}
+
+// ── Hover magnifier ───────────────────────────────────────────────────────────
+
+function HoverMagnifier({
+  match,
+  userCanvas,
+  cssX,
+  cssY,
+}: {
+  match:      GridMatch;
+  userCanvas: HTMLCanvasElement;
+  cssX:       number;
+  cssY:       number;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+
+    const srcR = LENS_R / ZOOM;
+    ctx.clearRect(0, 0, LENS_DIAM, LENS_DIAM);
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(LENS_R, LENS_R, LENS_R, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(
+      userCanvas,
+      match.userNx * userCanvas.width  - srcR,
+      match.userNy * userCanvas.height - srcR,
+      srcR * 2, srcR * 2,
+      0, 0, LENS_DIAM, LENS_DIAM,
+    );
+    ctx.restore();
+
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(LENS_R, LENS_R, LENS_R - 1, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(220,38,38,0.7)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(LENS_R - 7, LENS_R); ctx.lineTo(LENS_R + 7, LENS_R);
+    ctx.moveTo(LENS_R, LENS_R - 7); ctx.lineTo(LENS_R, LENS_R + 7);
+    ctx.stroke();
+  }, [match, userCanvas]);
+
+  return (
+    <div
+      className="pointer-events-none absolute z-10"
+      style={{ left: cssX - LENS_R, top: cssY - LENS_R, width: LENS_DIAM, height: LENS_DIAM }}
+    >
+      <canvas
+        ref={ref}
+        width={LENS_DIAM}
+        height={LENS_DIAM}
+        className="rounded-full shadow-lg"
+      />
+    </div>
+  );
+}
+
+// ── Patch popup ───────────────────────────────────────────────────────────────
+
+function PatchPopup({
+  match,
+  userCanvas,
+  cssX,
+  cssY,
+  onClose,
+}: {
+  match:      GridMatch;
+  userCanvas: HTMLCanvasElement;
+  cssX:       number;
+  cssY:       number;
+  onClose:    () => void;
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const PW  = 180;
+  const PH  = Math.round(PW * (userCanvas.height / userCanvas.width));
+
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(userCanvas, 0, 0, PW, PH);
+    const cx = match.userNx * PW;
+    const cy = match.userNy * PH;
+    ctx.strokeStyle = "rgba(220,38,38,0.9)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 15, cy); ctx.lineTo(cx + 15, cy);
+    ctx.moveTo(cx, cy - 15); ctx.lineTo(cx, cy + 15);
+    ctx.stroke();
+  }, [match, userCanvas, PW, PH]);
+
+  const POP_W = PW + 16;
+  const POP_H = PH + 44;
+  let left = cssX - POP_W / 2;
+  let top  = cssY - POP_H - 10;
+  if (top < 0) top = cssY + 10;
+  if (left < 0) left = 4;
+
+  return (
+    <div
+      className="absolute z-20 rounded border border-neutral-200 bg-white p-2 shadow-lg"
+      style={{ left, top, width: POP_W }}
+    >
+      <div className="mb-1.5 flex items-center justify-between">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400">
+          Source pixel
+        </p>
+        <button
+          onClick={onClose}
+          className="text-xs leading-none text-neutral-400 hover:text-neutral-600"
+        >
+          ✕
+        </button>
+      </div>
+      <canvas ref={ref} width={PW} height={PH} className="w-full rounded" />
+    </div>
+  );
 }
 
 // ── React component ───────────────────────────────────────────────────────────
@@ -337,11 +575,26 @@ type Props = {
 export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const userCacheRef = useRef<{ src: HTMLImageElement; canvas: HTMLCanvasElement } | null>(null);
+  const rafRef       = useRef<number>(0);
+  const layoutRef    = useRef<ReconLayout | null>(null);
+  const startAnimRef = useRef<() => void>(() => {});
+  const drawCompareRef = useRef<(norm: number) => void>(() => {});
+  const phasesRef    = useRef<PhasesData | null>(null);
+  const sliderNormRef  = useRef(0.5);
+  const isDraggingRef  = useRef(false);
+  const compareModeRef = useRef(false);
 
-  const [pd,         setPd]         = useState<PaintData | null>(null);
-  const [statusLine, setStatusLine] = useState("Choose a painting to begin");
-  const [isLoading,  setIsLoading]  = useState(false);
+  const [pd,           setPd]          = useState<PaintData | null>(null);
+  const [focal,        setFocal]       = useState<FocalBox | null>(null);
+  const [hoverNorm,    setHoverNorm]   = useState<{ nx: number; ny: number } | null>(null);
+  const [hoverMatch,   setHoverMatch]  = useState<GridMatch | null>(null);
+  const [cursorPos,    setCursorPos]   = useState<{ cssX: number; cssY: number } | null>(null);
+  const [clickedMatch, setClickedMatch] = useState<ClickedMatchInfo | null>(null);
+  const [compareMode,  setCompareMode] = useState(false);
+  const [statusLine,   setStatusLine]  = useState("Choose a painting to begin");
+  const [isLoading,    setIsLoading]   = useState(false);
 
+  // ── Load painting from Met API ──────────────────────────────────────────────
   useEffect(() => {
     if (!artwork) { setPd(null); setStatusLine("Choose a painting to begin"); return; }
 
@@ -368,7 +621,17 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     return () => { cancelled = true; };
   }, [artwork]);
 
+  // ── Draw / animate ──────────────────────────────────────────────────────────
   useEffect(() => {
+    cancelAnimationFrame(rafRef.current);
+
+    // Reset interactive overlay state on any input change
+    setCompareMode(false);
+    compareModeRef.current = false;
+    setClickedMatch(null);
+    setHoverMatch(null);
+    setHoverNorm(null);
+
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
@@ -376,6 +639,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const dpr = window.devicePixelRatio || 1;
 
     if (!pd) {
+      setFocal(null);
+      layoutRef.current = null;
+      phasesRef.current = null;
       canvas.width        = CANVAS_W * dpr;
       canvas.height       = 600      * dpr;
       canvas.style.width  = `${CANVAS_W}px`;
@@ -402,6 +668,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     }
 
     if (!userCacheRef.current) {
+      setFocal(null);
+      layoutRef.current = null;
+      phasesRef.current = null;
       const reconW = Math.round(CANVAS_W * RECON_FRAC);
       const reconH = Math.round(reconW * 0.75);
       const reconX = Math.round((CANVAS_W - reconW) / 2);
@@ -426,8 +695,335 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       return;
     }
 
-    drawThreadArt(ctx, dpr, pd, userCacheRef.current.canvas, patchCount);
+    const userCanvas = userCacheRef.current.canvas;
+
+    // ── Compute focal region + grid matches ──────────────────────────────────
+    const computedFocal = detectSalientRegion(pd.pixels, pd.w, pd.h);
+    setFocal(computedFocal);
+
+    const focalW = computedFocal.nx1 - computedFocal.nx0;
+    const focalH = computedFocal.ny1 - computedFocal.ny0;
+    const reconW = Math.round(CANVAS_W * RECON_FRAC);
+    const reconH = Math.round(reconW * focalH / focalW);
+    const reconX = Math.round((CANVAS_W - reconW) / 2);
+    const reconY = TOP_PAD;
+    layoutRef.current = { reconX, reconY, reconW, reconH };
+
+    const uCtx       = userCanvas.getContext("2d")!;
+    const uPx        = uCtx.getImageData(0, 0, userCanvas.width, userCanvas.height).data;
+    const candidates = buildColorIndex(uPx, userCanvas.width, userCanvas.height);
+    const { matches, cols, rows } = computeGridMatches(
+      pd.pixels, pd.w, pd.h, computedFocal, candidates, patchCount,
+    );
+    const cellDispW = reconW / cols;
+    const cellDispH = reconH / rows;
+    const patchR    = Math.max(1.0, Math.min(cellDispW, cellDispH) * 0.56);
+
+    const uAspect = userCanvas.height / userCanvas.width;
+    const userH   = Math.min(USER_MAX_H, Math.round(CANVAS_W * uAspect));
+    const userY   = reconY + reconH + THREAD_GAP;
+    const canvasH = userY + userH + BOTTOM_PAD;
+
+    const uScale = Math.max(CANVAS_W / userCanvas.width, userH / userCanvas.height);
+    const uVisW  = CANVAS_W / uScale;
+    const uVisH  = userH    / uScale;
+    const uCropX = (userCanvas.width  - uVisW) / 2;
+    const uCropY = (userCanvas.height - uVisH) / 2;
+
+    const toScreen = (nx: number, ny: number): [number, number] => [
+      ((nx * userCanvas.width  - uCropX) / uVisW) * CANVAS_W,
+      userY + ((ny * userCanvas.height - uCropY) / uVisH) * userH,
+    ];
+    const inUserArea = (ux: number, uy: number) =>
+      ux >= 0 && ux <= CANVAS_W && uy >= userY && uy <= userY + userH;
+
+    const pts = matches.map((m) => {
+      const [ux, uy] = toScreen(m.userNx, m.userNy);
+      return { rx: reconX + m.focalNx * reconW, ry: reconY + m.focalNy * reconH, ux, uy };
+    });
+    const validPts   = pts.filter((p) => inUserArea(p.ux, p.uy));
+    const threadStep = Math.max(1, Math.floor(validPts.length / MAX_THREADS));
+    const threadPts  = validPts.filter((_, i) => i % threadStep === 0).slice(0, MAX_THREADS);
+
+    const p1 = makePhase1(pd, computedFocal, reconW, reconH);
+    const p2 = makePhase2(pd, computedFocal, cols, rows, reconW, reconH, patchR);
+    const p3 = makePhase3(matches, userCanvas, reconW, reconH, patchR);
+
+    // Store phases for overlay features
+    phasesRef.current = { p1, p3, matches, userCanvas, patchR };
+
+    // ── Compare drawing (closed over ctx with DPR scale applied) ─────────────
+    drawCompareRef.current = (norm: number) => {
+      cancelAnimationFrame(rafRef.current);
+      const splitX = Math.round(norm * reconW);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, CANVAS_W, canvasH);
+      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
+
+      // Left: painting crop
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(reconX, reconY, splitX, reconH);
+      ctx.clip();
+      ctx.drawImage(p1, reconX, reconY, reconW, reconH);
+      ctx.restore();
+
+      // Right: user mosaic
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(reconX + splitX, reconY, reconW - splitX, reconH);
+      ctx.clip();
+      ctx.drawImage(p3, reconX, reconY, reconW, reconH);
+      ctx.restore();
+
+      // Divider
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.92)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(reconX + splitX, reconY);
+      ctx.lineTo(reconX + splitX, reconY + reconH);
+      ctx.stroke();
+      ctx.restore();
+
+      // Handle circle
+      const hx = reconX + splitX;
+      const hy = reconY + reconH / 2;
+      ctx.save();
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.beginPath();
+      ctx.arc(hx, hy, 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.18)";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "#555";
+      ctx.font = "bold 13px system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("⇔", hx, hy + 0.5);
+      ctx.restore();
+
+      // Labels
+      ctx.save();
+      ctx.font = "bold 9px system-ui, sans-serif";
+      ctx.textBaseline = "middle";
+      if (splitX > 72) {
+        ctx.fillStyle = "rgba(0,0,0,0.52)";
+        ctx.fillRect(reconX + 6, reconY + 6, 68, 16);
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "left";
+        ctx.fillText("ORIGINAL", reconX + 10, reconY + 14);
+      }
+      if (reconW - splitX > 90) {
+        ctx.fillStyle = "rgba(0,0,0,0.52)";
+        ctx.fillRect(reconX + reconW - 90, reconY + 6, 84, 16);
+        ctx.fillStyle = "#fff";
+        ctx.textAlign = "right";
+        ctx.fillText("YOUR PHOTO", reconX + reconW - 6, reconY + 14);
+      }
+      ctx.restore();
+    };
+
+    canvas.width        = CANVAS_W * dpr;
+    canvas.height       = canvasH  * dpr;
+    canvas.style.width  = `${CANVAS_W}px`;
+    canvas.style.height = `${canvasH}px`;
+    ctx.scale(dpr, dpr);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, CANVAS_W, canvasH);
+    ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
+    ctx.drawImage(p1, reconX, reconY, reconW, reconH);
+
+    // ── Animation starter ─────────────────────────────────────────────────────
+    startAnimRef.current = () => {
+      cancelAnimationFrame(rafRef.current);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, CANVAS_W, canvasH);
+      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
+
+      const startMs = performance.now();
+
+      const animate = (ts: number) => {
+        const t = ts - startMs;
+
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(reconX, reconY, reconW, reconH);
+
+        if (t < PHASE1_HOLD) {
+          ctx.drawImage(p1, reconX, reconY, reconW, reconH);
+          rafRef.current = requestAnimationFrame(animate);
+
+        } else if (t < PHASE1_HOLD + PHASE_FADE) {
+          const alpha = (t - PHASE1_HOLD) / PHASE_FADE;
+          ctx.drawImage(p1, reconX, reconY, reconW, reconH);
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(p2, reconX, reconY, reconW, reconH);
+          ctx.globalAlpha = 1;
+          rafRef.current = requestAnimationFrame(animate);
+
+        } else if (t < PHASE1_HOLD + PHASE_FADE * 2) {
+          const alpha = (t - PHASE1_HOLD - PHASE_FADE) / PHASE_FADE;
+          ctx.drawImage(p2, reconX, reconY, reconW, reconH);
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(p3, reconX, reconY, reconW, reconH);
+          ctx.globalAlpha = 1;
+          rafRef.current = requestAnimationFrame(animate);
+
+        } else {
+          // Final: native-DPR draw for sharp Retina output
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(reconX, reconY, reconW, reconH);
+          for (const m of matches) {
+            const cx = reconX + m.focalNx * reconW;
+            const cy = reconY + m.focalNy * reconH;
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(cx, cy, patchR, 0, Math.PI * 2);
+            ctx.clip();
+            const srcR = Math.max(1.5, patchR);
+            ctx.drawImage(
+              userCanvas,
+              m.userNx * userCanvas.width  - srcR,
+              m.userNy * userCanvas.height - srcR,
+              srcR * 2, srcR * 2,
+              cx - patchR, cy - patchR,
+              patchR * 2, patchR * 2,
+            );
+            ctx.restore();
+          }
+          ctx.save();
+          ctx.strokeStyle = "rgba(110,100,90,0.28)";
+          ctx.lineWidth   = 0.65;
+          for (const p of threadPts) {
+            ctx.beginPath(); ctx.moveTo(p.ux, p.uy); ctx.lineTo(p.rx, p.ry); ctx.stroke();
+          }
+          ctx.restore();
+          ctx.save();
+          for (const p of threadPts) {
+            ctx.beginPath();
+            ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fill();
+            ctx.strokeStyle = "rgba(0,0,0,0.20)"; ctx.lineWidth = 0.6; ctx.stroke();
+          }
+          ctx.restore();
+        }
+      };
+
+      rafRef.current = requestAnimationFrame(animate);
+    };
+
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      startAnimRef.current = () => {};
+      drawCompareRef.current = () => {};
+    };
   }, [sourceImage, pd, patchCount, isLoading]);
+
+  // ── IntersectionObserver: auto-play on scroll into view ──────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !pd || !sourceImage) return;
+
+    let fired = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting && !fired) {
+          fired = true;
+          observer.disconnect();
+          startAnimRef.current();
+        }
+      },
+      { threshold: 0.3 },
+    );
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [pd, sourceImage, patchCount]);
+
+  // ── Mouse handlers ────────────────────────────────────────────────────────────
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    const layout = layoutRef.current;
+    if (!layout) { setHoverNorm(null); setHoverMatch(null); return; }
+
+    const rect  = e.currentTarget.getBoundingClientRect();
+    const scale = CANVAS_W / rect.width;
+    const mx    = (e.clientX - rect.left) * scale;
+    const my    = (e.clientY - rect.top)  * scale;
+    const { reconX, reconY, reconW, reconH } = layout;
+    const inRecon = mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH;
+
+    if (compareModeRef.current) {
+      if (isDraggingRef.current) {
+        const norm = Math.max(0, Math.min(1, (mx - reconX) / reconW));
+        sliderNormRef.current = norm;
+        drawCompareRef.current(norm);
+      }
+      return;
+    }
+
+    if (inRecon) {
+      const fnx = (mx - reconX) / reconW;
+      const fny = (my - reconY) / reconH;
+      setHoverNorm({ nx: fnx, ny: fny });
+      const phases = phasesRef.current;
+      if (phases) {
+        const m = findClosestMatch(phases.matches, fnx, fny);
+        setHoverMatch(m);
+        setCursorPos({ cssX: e.clientX - rect.left, cssY: e.clientY - rect.top });
+      }
+    } else {
+      setHoverNorm(null);
+      setHoverMatch(null);
+    }
+  }, []);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!compareModeRef.current) return;
+    const layout = layoutRef.current;
+    if (!layout) return;
+    const rect  = e.currentTarget.getBoundingClientRect();
+    const scale = CANVAS_W / rect.width;
+    const mx    = (e.clientX - rect.left) * scale;
+    const my    = (e.clientY - rect.top)  * scale;
+    const { reconX, reconY, reconW, reconH } = layout;
+    if (mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH) {
+      isDraggingRef.current = true;
+    }
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    isDraggingRef.current = false;
+  }, []);
+
+  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (compareModeRef.current) return;
+    const layout = layoutRef.current;
+    const phases = phasesRef.current;
+    if (!layout || !phases) return;
+
+    const rect  = e.currentTarget.getBoundingClientRect();
+    const scale = CANVAS_W / rect.width;
+    const mx    = (e.clientX - rect.left) * scale;
+    const my    = (e.clientY - rect.top)  * scale;
+    const { reconX, reconY, reconW, reconH } = layout;
+
+    if (mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH) {
+      const fnx   = (mx - reconX) / reconW;
+      const fny   = (my - reconY) / reconH;
+      const match = findClosestMatch(phases.matches, fnx, fny);
+      if (match) {
+        const cssX = e.clientX - rect.left;
+        const cssY = e.clientY - rect.top;
+        setClickedMatch((prev) =>
+          prev && prev.match === match ? null : { match, cssX, cssY },
+        );
+      }
+    } else {
+      setClickedMatch(null);
+    }
+  }, []);
 
   function handleExport() {
     const canvas = canvasRef.current;
@@ -438,18 +1034,155 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     a.click();
   }
 
+  function handleShareExport() {
+    const phases = phasesRef.current;
+    if (!phases || !artwork) {
+      handleExport();
+      return;
+    }
+
+    const size = 1080;
+    const share = document.createElement("canvas");
+    share.width = size;
+    share.height = size;
+    const ctx = share.getContext("2d");
+    if (!ctx) return;
+
+    ctx.fillStyle = "#f8f5ee";
+    ctx.fillRect(0, 0, size, size);
+
+    ctx.fillStyle = "#171717";
+    ctx.font = "56px Georgia, serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText("Hidden in Art", size / 2, 104);
+
+    ctx.fillStyle = "#6b6258";
+    ctx.font = "22px Arial, sans-serif";
+    ctx.fillText("Your photo, reconstructed through a famous painting", size / 2, 146);
+
+    const gap = 28;
+    const panelW = (size - 120 - gap) / 2;
+    const panelH = 570;
+    const y = 190;
+    const leftX = 60;
+    const rightX = leftX + panelW + gap;
+
+    drawSharePanel(ctx, phases.p3, leftX, y, panelW, panelH, "YOUR RESULT");
+    drawSharePanel(ctx, phases.p1, rightX, y, panelW, panelH, "ORIGINAL CROP");
+
+    ctx.fillStyle = "#171717";
+    ctx.font = "42px Georgia, serif";
+    fitCenteredText(ctx, artwork.title, size / 2, 835, 900, 42);
+
+    ctx.fillStyle = "#6b6258";
+    ctx.font = "24px Arial, sans-serif";
+    fitCenteredText(ctx, artwork.artist, size / 2, 876, 820, 24);
+
+    ctx.strokeStyle = "rgba(23,23,23,0.16)";
+    ctx.beginPath();
+    ctx.moveTo(260, 924);
+    ctx.lineTo(820, 924);
+    ctx.stroke();
+
+    ctx.fillStyle = "#171717";
+    ctx.font = "26px Georgia, serif";
+    ctx.fillText("hidden-in-art", size / 2, 982);
+
+    const a = document.createElement("a");
+    a.href = share.toDataURL("image/png");
+    a.download = "hidden-in-art-share.png";
+    a.click();
+  }
+
+  const phases = phasesRef.current;
+
   return (
     <div className="flex flex-col items-center gap-3">
-      <canvas ref={canvasRef} className="max-w-full rounded shadow-md" />
-      <div className="flex w-full max-w-[900px] items-center justify-between px-1">
+      {focal && artwork && (
+        <PaintingLocator focal={focal} artwork={artwork} hoverNorm={hoverNorm} />
+      )}
+
+      {/* Canvas wrapper — relative so overlays can be positioned inside */}
+      <div className="relative w-full" style={{ maxWidth: CANVAS_W }}>
+        <canvas
+          ref={canvasRef}
+          className="max-w-full rounded shadow-md"
+          style={{ cursor: compareMode ? "ew-resize" : "crosshair" }}
+          onMouseMove={handleMouseMove}
+          onMouseDown={handleMouseDown}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={() => {
+            setHoverNorm(null);
+            setHoverMatch(null);
+            isDraggingRef.current = false;
+          }}
+          onClick={handleClick}
+        />
+        {/* Hover magnifier */}
+        {!compareMode && hoverMatch && cursorPos && phases && (
+          <HoverMagnifier
+            match={hoverMatch}
+            userCanvas={phases.userCanvas}
+            cssX={cursorPos.cssX}
+            cssY={cursorPos.cssY}
+          />
+        )}
+        {/* Click-patch popup */}
+        {!compareMode && clickedMatch && phases && (
+          <PatchPopup
+            match={clickedMatch.match}
+            userCanvas={phases.userCanvas}
+            cssX={clickedMatch.cssX}
+            cssY={clickedMatch.cssY}
+            onClose={() => setClickedMatch(null)}
+          />
+        )}
+      </div>
+
+      <div className="flex w-full max-w-[900px] flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-xs italic text-neutral-400">{statusLine}</p>
-        <button
-          onClick={handleExport}
-          disabled={!pd}
-          className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
-        >
-          Export PNG
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => {
+              const next = !compareMode;
+              setCompareMode(next);
+              compareModeRef.current = next;
+              setClickedMatch(null);
+              if (next) drawCompareRef.current(sliderNormRef.current);
+              else      startAnimRef.current();
+            }}
+            disabled={!pd || !sourceImage}
+            className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
+          >
+            {compareMode ? "✕ Compare" : "⇔ Compare"}
+          </button>
+          <button
+            onClick={() => {
+              if (compareMode) return;
+              startAnimRef.current();
+            }}
+            disabled={!pd || !sourceImage || compareMode}
+            className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
+          >
+            ↺ Replay
+          </button>
+          <button
+            onClick={handleExport}
+            disabled={!pd}
+            className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
+          >
+            Export PNG
+          </button>
+          <button
+            onClick={handleShareExport}
+            disabled={!pd || !sourceImage}
+            className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-1.5 text-xs text-white transition hover:bg-neutral-700 disabled:opacity-40"
+          >
+            <ImageIcon className="h-3.5 w-3.5" />
+            Share square
+          </button>
+        </div>
       </div>
     </div>
   );
