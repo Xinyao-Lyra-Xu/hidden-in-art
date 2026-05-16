@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Image as ImageIcon } from "lucide-react";
+import { Columns2, Download, Image as ImageIcon, RotateCcw } from "lucide-react";
 import type { ArtworkMetadata } from "@/types/art";
 
 // ── Layout constants ──────────────────────────────────────────────────────────
@@ -346,8 +346,7 @@ function PaintingLocator({
   return (
     <div className="flex flex-col items-center gap-2">
       <div
-        className="relative inline-block overflow-hidden rounded border border-neutral-200 shadow-sm"
-        style={{ width: 176 }}
+        className="relative inline-block w-[140px] overflow-hidden rounded border border-neutral-200 shadow-sm sm:w-[176px]"
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
@@ -375,7 +374,7 @@ function PaintingLocator({
           )}
         </svg>
       </div>
-      <p className="max-w-[200px] text-center text-[11px] leading-snug text-neutral-500">
+      <p className="museum-caption max-w-[200px] text-center text-[11px] text-neutral-500">
         Reconstructing:{" "}
         <span className="font-semibold text-neutral-700">{regionLabel(focal)}</span>{" "}
         region of <em>&ldquo;{artwork.title}&rdquo;</em>
@@ -435,6 +434,7 @@ function fitCenteredText(
 
 // ── Hover magnifier ───────────────────────────────────────────────────────────
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function HoverMagnifier({
   match,
   userCanvas,
@@ -549,7 +549,7 @@ function PatchPopup({
       style={{ left, top, width: POP_W }}
     >
       <div className="mb-1.5 flex items-center justify-between">
-        <p className="text-[10px] font-semibold uppercase tracking-widest text-neutral-400">
+        <p className="museum-label text-neutral-400">
           Source pixel
         </p>
         <button
@@ -583,16 +583,25 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   const sliderNormRef  = useRef(0.5);
   const isDraggingRef  = useRef(false);
   const compareModeRef = useRef(false);
+  const longPressRef   = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
 
   const [pd,           setPd]          = useState<PaintData | null>(null);
   const [focal,        setFocal]       = useState<FocalBox | null>(null);
   const [hoverNorm,    setHoverNorm]   = useState<{ nx: number; ny: number } | null>(null);
-  const [hoverMatch,   setHoverMatch]  = useState<GridMatch | null>(null);
-  const [cursorPos,    setCursorPos]   = useState<{ cssX: number; cssY: number } | null>(null);
   const [clickedMatch, setClickedMatch] = useState<ClickedMatchInfo | null>(null);
   const [compareMode,  setCompareMode] = useState(false);
   const [statusLine,   setStatusLine]  = useState("Choose a painting to begin");
   const [isLoading,    setIsLoading]   = useState(false);
+  const [isMobile,     setIsMobile]    = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 639px)");
+    const update = () => setIsMobile(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   // ── Load painting from Met API ──────────────────────────────────────────────
   useEffect(() => {
@@ -604,20 +613,39 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     setPd(null);
 
     const img = new window.Image();
+    const imageSrc = artwork.image || (() => {
+      const q = artwork.query ?? `${artwork.title} ${artwork.artist}`;
+      return `/api/met-painting?id=${artwork.metId ?? 0}&q=${encodeURIComponent(q)}`;
+    })();
+    if (/^https?:\/\//i.test(imageSrc)) img.crossOrigin = "anonymous";
     img.onload = () => {
       if (cancelled) return;
-      const oc   = makeOffscreen(img, MAX_PX);
-      const octx = oc.getContext("2d")!;
-      const id   = octx.getImageData(0, 0, oc.width, oc.height);
+      let oc: HTMLCanvasElement;
+      let id: ImageData;
+      try {
+        oc = makeOffscreen(img, MAX_PX);
+        const octx = oc.getContext("2d")!;
+        id = octx.getImageData(0, 0, oc.width, oc.height);
+      } catch {
+        setPd(null);
+        console.warn("Target image failed to load:", artwork.title);
+        setStatusLine(`Could not reconstruct "${artwork.title}" because its image blocks canvas access.`);
+        setIsLoading(false);
+        return;
+      }
       setPd({ pixels: new Uint8ClampedArray(id.data), w: oc.width, h: oc.height });
+      console.log("Target image loaded:", artwork.title);
       setStatusLine(`${artwork.title} — ${artwork.artist}`);
       setIsLoading(false);
     };
     img.onerror = () => {
-      if (!cancelled) { setStatusLine(`Failed to load "${artwork.title}"`); setIsLoading(false); }
+      if (!cancelled) {
+        console.warn("Target image failed to load:", artwork.title);
+        setStatusLine(`Failed to load "${artwork.title}"`);
+        setIsLoading(false);
+      }
     };
-    const q = artwork.query ?? `${artwork.title} ${artwork.artist}`;
-    img.src = `/api/met-painting?id=${artwork.metId ?? 0}&q=${encodeURIComponent(q)}`;
+    img.src = imageSrc;
     return () => { cancelled = true; };
   }, [artwork]);
 
@@ -629,7 +657,6 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     setCompareMode(false);
     compareModeRef.current = false;
     setClickedMatch(null);
-    setHoverMatch(null);
     setHoverNorm(null);
 
     const canvas = canvasRef.current;
@@ -724,18 +751,24 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const userY   = reconY + reconH + THREAD_GAP;
     const canvasH = userY + userH + BOTTOM_PAD;
 
-    const uScale = Math.max(CANVAS_W / userCanvas.width, userH / userCanvas.height);
-    const uVisW  = CANVAS_W / uScale;
-    const uVisH  = userH    / uScale;
-    const uCropX = (userCanvas.width  - uVisW) / 2;
-    const uCropY = (userCanvas.height - uVisH) / 2;
+    const uScale = isMobile
+      ? Math.min(CANVAS_W / userCanvas.width, userH / userCanvas.height)
+      : Math.max(CANVAS_W / userCanvas.width, userH / userCanvas.height);
+    const uVisW  = isMobile ? userCanvas.width : CANVAS_W / uScale;
+    const uVisH  = isMobile ? userCanvas.height : userH / uScale;
+    const uDrawW = isMobile ? userCanvas.width * uScale : CANVAS_W;
+    const uDrawH = isMobile ? userCanvas.height * uScale : userH;
+    const uDrawX = isMobile ? (CANVAS_W - uDrawW) / 2 : 0;
+    const uDrawY = isMobile ? userY + (userH - uDrawH) / 2 : userY;
+    const uCropX = isMobile ? 0 : (userCanvas.width - uVisW) / 2;
+    const uCropY = isMobile ? 0 : (userCanvas.height - uVisH) / 2;
 
     const toScreen = (nx: number, ny: number): [number, number] => [
-      ((nx * userCanvas.width  - uCropX) / uVisW) * CANVAS_W,
-      userY + ((ny * userCanvas.height - uCropY) / uVisH) * userH,
+      uDrawX + ((nx * userCanvas.width - uCropX) / uVisW) * uDrawW,
+      uDrawY + ((ny * userCanvas.height - uCropY) / uVisH) * uDrawH,
     ];
     const inUserArea = (ux: number, uy: number) =>
-      ux >= 0 && ux <= CANVAS_W && uy >= userY && uy <= userY + userH;
+      ux >= uDrawX && ux <= uDrawX + uDrawW && uy >= uDrawY && uy <= uDrawY + uDrawH;
 
     const pts = matches.map((m) => {
       const [ux, uy] = toScreen(m.userNx, m.userNy);
@@ -759,7 +792,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, CANVAS_W, canvasH);
-      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
+      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
 
       // Left: painting crop
       ctx.save();
@@ -834,7 +867,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, CANVAS_W, canvasH);
-    ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
+    ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
     ctx.drawImage(p1, reconX, reconY, reconW, reconH);
 
     // ── Animation starter ─────────────────────────────────────────────────────
@@ -842,7 +875,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       cancelAnimationFrame(rafRef.current);
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, CANVAS_W, canvasH);
-      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, 0, userY, CANVAS_W, userH);
+      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
 
       const startMs = performance.now();
 
@@ -894,21 +927,23 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
             );
             ctx.restore();
           }
-          ctx.save();
-          ctx.strokeStyle = "rgba(110,100,90,0.28)";
-          ctx.lineWidth   = 0.65;
-          for (const p of threadPts) {
-            ctx.beginPath(); ctx.moveTo(p.ux, p.uy); ctx.lineTo(p.rx, p.ry); ctx.stroke();
+          if (!isMobile) {
+            ctx.save();
+            ctx.strokeStyle = "rgba(110,100,90,0.28)";
+            ctx.lineWidth   = 0.65;
+            for (const p of threadPts) {
+              ctx.beginPath(); ctx.moveTo(p.ux, p.uy); ctx.lineTo(p.rx, p.ry); ctx.stroke();
+            }
+            ctx.restore();
+            ctx.save();
+            for (const p of threadPts) {
+              ctx.beginPath();
+              ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
+              ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fill();
+              ctx.strokeStyle = "rgba(0,0,0,0.20)"; ctx.lineWidth = 0.6; ctx.stroke();
+            }
+            ctx.restore();
           }
-          ctx.restore();
-          ctx.save();
-          for (const p of threadPts) {
-            ctx.beginPath();
-            ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
-            ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fill();
-            ctx.strokeStyle = "rgba(0,0,0,0.20)"; ctx.lineWidth = 0.6; ctx.stroke();
-          }
-          ctx.restore();
         }
       };
 
@@ -920,7 +955,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       startAnimRef.current = () => {};
       drawCompareRef.current = () => {};
     };
-  }, [sourceImage, pd, patchCount, isLoading]);
+  }, [sourceImage, pd, patchCount, isLoading, isMobile]);
 
   // ── IntersectionObserver: auto-play on scroll into view ──────────────────────
   useEffect(() => {
@@ -943,9 +978,42 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   }, [pd, sourceImage, patchCount]);
 
   // ── Mouse handlers ────────────────────────────────────────────────────────────
-  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const clearLongPress = useCallback(() => {
+    if (longPressRef.current !== null) window.clearTimeout(longPressRef.current);
+    longPressRef.current = null;
+  }, []);
+
+  const openPatchAt = useCallback((canvas: HTMLCanvasElement, clientX: number, clientY: number) => {
     const layout = layoutRef.current;
-    if (!layout) { setHoverNorm(null); setHoverMatch(null); return; }
+    const phases = phasesRef.current;
+    if (!layout || !phases) return;
+
+    const rect  = canvas.getBoundingClientRect();
+    const scale = CANVAS_W / rect.width;
+    const mx    = (clientX - rect.left) * scale;
+    const my    = (clientY - rect.top) * scale;
+    const { reconX, reconY, reconW, reconH } = layout;
+
+    if (mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH) {
+      const fnx   = (mx - reconX) / reconW;
+      const fny   = (my - reconY) / reconH;
+      const match = findClosestMatch(phases.matches, fnx, fny);
+      if (match) {
+        setClickedMatch((prev) =>
+          prev && prev.match === match
+            ? null
+            : { match, cssX: clientX - rect.left, cssY: clientY - rect.top },
+        );
+      }
+    } else {
+      setClickedMatch(null);
+    }
+  }, []);
+
+  const handlePointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.pointerType !== "mouse") clearLongPress();
+    const layout = layoutRef.current;
+    if (!layout) { setHoverNorm(null); return; }
 
     const rect  = e.currentTarget.getBoundingClientRect();
     const scale = CANVAS_W / rect.width;
@@ -967,20 +1035,12 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       const fnx = (mx - reconX) / reconW;
       const fny = (my - reconY) / reconH;
       setHoverNorm({ nx: fnx, ny: fny });
-      const phases = phasesRef.current;
-      if (phases) {
-        const m = findClosestMatch(phases.matches, fnx, fny);
-        setHoverMatch(m);
-        setCursorPos({ cssX: e.clientX - rect.left, cssY: e.clientY - rect.top });
-      }
     } else {
       setHoverNorm(null);
-      setHoverMatch(null);
     }
-  }, []);
+  }, [clearLongPress]);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!compareModeRef.current) return;
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
     const layout = layoutRef.current;
     if (!layout) return;
     const rect  = e.currentTarget.getBoundingClientRect();
@@ -989,41 +1049,34 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const my    = (e.clientY - rect.top)  * scale;
     const { reconX, reconY, reconW, reconH } = layout;
     if (mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH) {
+      if (!compareModeRef.current && e.pointerType !== "mouse") {
+        const canvas = e.currentTarget;
+        const clientX = e.clientX;
+        const clientY = e.clientY;
+        suppressClickRef.current = true;
+        longPressRef.current = window.setTimeout(() => openPatchAt(canvas, clientX, clientY), 500);
+        return;
+      }
+      if (!compareModeRef.current) return;
       isDraggingRef.current = true;
+      e.currentTarget.setPointerCapture(e.pointerId);
     }
-  }, []);
+  }, [openPatchAt]);
 
-  const handleMouseUp = useCallback(() => {
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    clearLongPress();
     isDraggingRef.current = false;
-  }, []);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  }, [clearLongPress]);
 
   const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (compareModeRef.current) return;
-    const layout = layoutRef.current;
-    const phases = phasesRef.current;
-    if (!layout || !phases) return;
-
-    const rect  = e.currentTarget.getBoundingClientRect();
-    const scale = CANVAS_W / rect.width;
-    const mx    = (e.clientX - rect.left) * scale;
-    const my    = (e.clientY - rect.top)  * scale;
-    const { reconX, reconY, reconW, reconH } = layout;
-
-    if (mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH) {
-      const fnx   = (mx - reconX) / reconW;
-      const fny   = (my - reconY) / reconH;
-      const match = findClosestMatch(phases.matches, fnx, fny);
-      if (match) {
-        const cssX = e.clientX - rect.left;
-        const cssY = e.clientY - rect.top;
-        setClickedMatch((prev) =>
-          prev && prev.match === match ? null : { match, cssX, cssY },
-        );
-      }
-    } else {
-      setClickedMatch(null);
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
     }
-  }, []);
+    if (compareModeRef.current) return;
+    openPatchAt(e.currentTarget, e.clientX, e.clientY);
+  }, [openPatchAt]);
 
   function handleExport() {
     const canvas = canvasRef.current;
@@ -1107,27 +1160,22 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       <div className="relative w-full" style={{ maxWidth: CANVAS_W }}>
         <canvas
           ref={canvasRef}
-          className="max-w-full rounded shadow-md"
-          style={{ cursor: compareMode ? "ew-resize" : "crosshair" }}
-          onMouseMove={handleMouseMove}
-          onMouseDown={handleMouseDown}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={() => {
+          className="max-w-full touch-manipulation rounded shadow-md"
+          style={{
+            cursor: compareMode ? "ew-resize" : "crosshair",
+            touchAction: compareMode ? "none" : "manipulation",
+          }}
+          onPointerMove={handlePointerMove}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+          onPointerLeave={() => {
+            clearLongPress();
             setHoverNorm(null);
-            setHoverMatch(null);
             isDraggingRef.current = false;
           }}
           onClick={handleClick}
         />
-        {/* Hover magnifier */}
-        {!compareMode && hoverMatch && cursorPos && phases && (
-          <HoverMagnifier
-            match={hoverMatch}
-            userCanvas={phases.userCanvas}
-            cssX={cursorPos.cssX}
-            cssY={cursorPos.cssY}
-          />
-        )}
         {/* Click-patch popup */}
         {!compareMode && clickedMatch && phases && (
           <PatchPopup
@@ -1141,8 +1189,8 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       </div>
 
       <div className="flex w-full max-w-[900px] flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs italic text-neutral-400">{statusLine}</p>
-        <div className="flex flex-wrap items-center gap-2">
+        <p className="museum-caption text-xs text-neutral-400">{statusLine}</p>
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
           <button
             onClick={() => {
               const next = !compareMode;
@@ -1153,8 +1201,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
               else      startAnimRef.current();
             }}
             disabled={!pd || !sourceImage}
-            className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
+            className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
           >
+            <Columns2 className="h-3.5 w-3.5" />
             {compareMode ? "✕ Compare" : "⇔ Compare"}
           </button>
           <button
@@ -1163,21 +1212,23 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
               startAnimRef.current();
             }}
             disabled={!pd || !sourceImage || compareMode}
-            className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
+            className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
           >
+            <RotateCcw className="h-3.5 w-3.5" />
             ↺ Replay
           </button>
           <button
             onClick={handleExport}
             disabled={!pd}
-            className="rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition hover:bg-neutral-50 disabled:opacity-40"
+            className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
           >
+            <Download className="h-3.5 w-3.5" />
             Export PNG
           </button>
           <button
             onClick={handleShareExport}
             disabled={!pd || !sourceImage}
-            className="inline-flex items-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-1.5 text-xs text-white transition hover:bg-neutral-700 disabled:opacity-40"
+            className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-800 bg-neutral-900 px-4 py-1.5 text-xs text-white transition active:scale-[0.97] hover:bg-neutral-700 disabled:opacity-40 sm:min-h-0"
           >
             <ImageIcon className="h-3.5 w-3.5" />
             Share square
