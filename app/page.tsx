@@ -42,6 +42,7 @@ export default function Home() {
   const [history,         setHistory]         = useState<HistoryItem[]>([]);
 
   const prevBlobRef = useRef("");
+  const patchTouchedRef = useRef(false);
 
   // Load the painting library once on mount
   useEffect(() => {
@@ -68,6 +69,12 @@ export default function Home() {
         setHistory([]);
       }
     });
+  }, []);
+
+  useEffect(() => {
+    if (!patchTouchedRef.current && window.matchMedia("(max-width: 639px)").matches) {
+      setPatchCount(2000);
+    }
   }, []);
 
   function rememberArtwork(
@@ -184,10 +191,10 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#f8f5ee] text-neutral-900">
-      <section className="mx-auto flex max-w-4xl flex-col gap-8 px-6 py-12">
+      <section className="mx-auto flex max-w-4xl flex-col gap-8 px-4 py-12 sm:px-6">
 
         <header className="text-center">
-          <h1 className="font-serif text-5xl tracking-tight md:text-7xl">
+          <h1 className="museum-display text-[3.4rem] leading-none md:text-[5.15rem]">
             Hidden in Art
           </h1>
           <p className="mx-auto mt-3 max-w-xl text-base leading-7 text-neutral-600">
@@ -195,11 +202,11 @@ export default function Home() {
           </p>
         </header>
 
-        <div className="mx-auto w-full max-w-2xl rounded border border-neutral-200 bg-white/60 p-6 shadow-sm backdrop-blur">
+        <div className="mx-auto w-full max-w-2xl rounded border border-neutral-200 bg-white/60 p-3 shadow-sm backdrop-blur sm:max-w-[720px] sm:p-6 min-[1025px]:max-w-2xl">
 
           {/* Photo upload */}
           <div className="mb-6">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-widest text-neutral-500">
+            <p className="museum-label mb-2 text-neutral-500">
               Your Photo
             </p>
             <UploadBox
@@ -213,10 +220,10 @@ export default function Home() {
           {/* Matched paintings — shown after upload */}
           {recommendations.length > 0 && (
             <div className="mb-6">
-              <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-neutral-500">
+              <p className="museum-label mb-3 text-neutral-500">
                 Best Matches for Your Photo
               </p>
-              <div className="grid grid-cols-5 gap-2">
+              <div className="best-match-scroll -mx-3 flex snap-x snap-mandatory gap-2 overflow-x-auto px-3 sm:mx-0 sm:grid sm:grid-cols-5 sm:overflow-visible sm:px-0">
                 {recommendations.map(({ artwork, score }) => {
                   const isSelected = selectedArtwork?.id === artwork.id;
                   return (
@@ -226,7 +233,7 @@ export default function Home() {
                       aria-pressed={isSelected}
                       title={`Use ${artwork.title} as the reconstruction target`}
                       onClick={() => selectArtworkAsTarget(artwork)}
-                      className={`group relative flex cursor-pointer flex-col overflow-hidden rounded border text-left transition focus:outline-none focus:ring-2 focus:ring-neutral-700 ${
+                      className={`group relative flex min-w-[calc((100%_-_1rem)/2.3)] snap-start cursor-pointer touch-manipulation flex-col overflow-hidden rounded border text-left transition active:scale-[0.97] focus:outline-none focus:ring-2 focus:ring-neutral-700 sm:min-w-[110px] ${
                         isSelected
                           ? "border-neutral-800 bg-white ring-2 ring-neutral-700"
                           : "border-neutral-200 bg-white/70 hover:border-neutral-500 hover:bg-white"
@@ -250,7 +257,7 @@ export default function Home() {
                         )}
                       </div>
                       <div className="p-1.5">
-                        <p className="truncate text-[11px] font-medium leading-tight text-neutral-800">
+                        <p className="museum-serif truncate text-sm font-medium leading-tight text-neutral-800">
                           {artwork.title}
                         </p>
                         <p className="truncate text-[10px] leading-tight text-neutral-500">
@@ -262,7 +269,7 @@ export default function Home() {
                 })}
               </div>
               {selectedArtwork && (
-                <p className="mt-3 text-xs text-neutral-500">
+                <p className="museum-caption mt-3 text-xs text-neutral-500">
                   Reconstructing with{" "}
                   <span className="font-medium text-neutral-700">{selectedArtwork.title}</span>.
                   Click another match to rerun with that artwork.
@@ -276,7 +283,7 @@ export default function Home() {
             <div className="mb-6">
               <label
                 htmlFor="painting-select"
-                className="mb-2 block text-xs font-semibold uppercase tracking-widest text-neutral-500"
+                className="museum-label mb-2 block text-neutral-500"
               >
                 Famous Painting
               </label>
@@ -311,7 +318,10 @@ export default function Home() {
             min={1600}
             max={4096}
             step={100}
-            onChange={setPatchCount}
+            onChange={(value) => {
+              patchTouchedRef.current = true;
+              setPatchCount(value);
+            }}
           />
 
           {sourceImage && (
@@ -325,7 +335,7 @@ export default function Home() {
 
         {/* Scroll guide — appears after upload to direct attention downward */}
         {sourceImage && selectedArtwork && (
-          <p className="text-center text-sm text-neutral-500">
+          <p className="museum-caption text-center text-sm text-neutral-500">
             ↓ Scroll down to see how{" "}
             <span className="font-medium text-neutral-700">{selectedArtwork.artist}</span>{" "}
             would have painted with your pixels
@@ -383,7 +393,7 @@ function UploadBox({
   return (
     <label
       htmlFor="photo-upload"
-      className={`flex cursor-pointer flex-col items-center justify-center rounded border border-dashed border-neutral-300 px-5 py-8 text-center transition hover:bg-white/70 ${
+      className={`flex cursor-pointer touch-manipulation flex-col items-center justify-center rounded border border-dashed border-neutral-300 px-3 py-4 text-center transition hover:bg-white/70 sm:px-5 sm:py-8 ${
         disabled ? "pointer-events-none opacity-50" : ""
       }`}
     >
@@ -395,7 +405,8 @@ function UploadBox({
       <input
         id="photo-upload"
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp"
+        capture="environment"
         className="hidden"
         disabled={disabled}
         onChange={(e) => {
@@ -435,8 +446,11 @@ function Slider({
 }) {
   return (
     <label className="block text-sm text-neutral-700">
-      <span>
-        {label}: <span className="font-medium">{value}</span>
+      <span className="block">
+        {label}
+      </span>
+      <span className="museum-tabular mt-1 block font-medium">
+        {value}
       </span>
       <input
         type="range"
@@ -445,7 +459,7 @@ function Slider({
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-2 w-full accent-neutral-700"
+        className="touch-range mt-2 w-full accent-neutral-700"
       />
     </label>
   );
@@ -465,7 +479,7 @@ function ActionStrip({
       <button
         type="button"
         onClick={onTryPhoto}
-        className="inline-flex items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition hover:bg-neutral-50"
+        className="inline-flex min-h-12 touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition active:scale-[0.97] hover:bg-neutral-50 sm:min-h-0"
       >
         <Upload className="h-4 w-4" />
         Try another photo
@@ -474,7 +488,7 @@ function ActionStrip({
         type="button"
         onClick={onTryArtwork}
         disabled={!canTryArtwork}
-        className="inline-flex items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition hover:bg-neutral-50 disabled:opacity-40"
+        className="inline-flex min-h-12 touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
       >
         <Shuffle className="h-4 w-4" />
         Try another painting
@@ -498,11 +512,11 @@ function HistoryGallery({
     <section className="w-full">
       <div className="mb-3 flex items-center gap-2">
         <History className="h-4 w-4 text-neutral-500" />
-        <h2 className="text-xs font-semibold uppercase tracking-widest text-neutral-500">
+        <h2 className="museum-label text-neutral-500">
           Personal Gallery
         </h2>
       </div>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 min-[1025px]:grid-cols-3">
         {items.map((item) => {
           const isSelected =
             selectedArtwork?.id === item.artworkId ||
@@ -522,7 +536,7 @@ function HistoryGallery({
                   onSelect(item);
                 }
               }}
-              className={`overflow-hidden rounded border shadow-sm transition focus:outline-none focus:ring-2 focus:ring-neutral-700 ${
+              className={`touch-manipulation overflow-hidden rounded border shadow-sm transition active:scale-[0.97] focus:outline-none focus:ring-2 focus:ring-neutral-700 ${
                 isSelected
                   ? "cursor-pointer border-neutral-800 bg-white ring-2 ring-neutral-700"
                   : "cursor-pointer border-neutral-200 bg-white/70 hover:border-neutral-500 hover:bg-white"
@@ -530,11 +544,12 @@ function HistoryGallery({
             >
               <div className="relative grid aspect-[4/3] grid-cols-2 bg-neutral-100">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={item.photoThumb} alt="" className="h-full w-full object-cover" />
+                <img src={item.photoThumb} alt="" loading="lazy" className="h-full w-full object-cover" />
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={item.artworkImage}
                   alt={item.artworkTitle}
+                  loading="lazy"
                   className="h-full w-full object-cover"
                 />
                 {isSelected && (
@@ -544,7 +559,7 @@ function HistoryGallery({
                 )}
               </div>
               <div className="p-3">
-                <p className="truncate font-serif text-sm text-neutral-900">{item.artworkTitle}</p>
+                <p className="museum-serif truncate text-base font-medium text-neutral-900">{item.artworkTitle}</p>
                 <p className="truncate text-xs text-neutral-500">{item.artworkArtist}</p>
               </div>
             </article>
@@ -583,13 +598,13 @@ function PaletteCard({
 
   return (
     <div className="w-full rounded border border-neutral-200 bg-white/70 p-4 shadow-sm backdrop-blur">
-      <p className="mb-3 text-xs font-semibold uppercase tracking-widest text-neutral-500">
+      <p className="museum-label mb-3 text-neutral-500">
         Color Palette Match
       </p>
-      <div className="flex gap-6">
+      <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
         {artSwatches.length > 0 && (
           <div className="flex-1">
-            <p className="mb-1.5 truncate text-[11px] text-neutral-400">{artwork.title}</p>
+            <p className="museum-caption mb-1.5 truncate text-[11px] text-neutral-400">{artwork.title}</p>
             <div className="flex gap-1">
               {artSwatches.map((hex, i) => (
                 <div
@@ -618,7 +633,7 @@ function PaletteCard({
           </div>
         )}
       </div>
-      <p className="mt-2 text-[11px] leading-relaxed text-neutral-400">
+      <p className="museum-caption mt-2 text-[11px] text-neutral-400">
         The reconstruction maps each patch to the closest color in your photo, so similar tones
         transfer naturally while the painting&apos;s overall palette stays recognizable.
       </p>

@@ -10,6 +10,8 @@
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  --font-serif: var(--font-eb-garamond);
+  --font-display: var(--font-cormorant-garamond);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,7 +24,9 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.005em;
 }
 
 html,
@@ -34,6 +38,7 @@ body {
 body {
   background: #f8f5ee;
   color: #171717;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 * {
@@ -43,4 +48,57 @@ body {
 ::selection {
   background: #ddd0af;
   color: #111;
+}
+
+.museum-display {
+  font-family: var(--font-cormorant-garamond), Georgia, serif;
+  font-weight: 400;
+  letter-spacing: -0.02em;
+}
+
+.museum-serif {
+  font-family: var(--font-eb-garamond), Georgia, serif;
+}
+
+.museum-caption {
+  font-family: var(--font-eb-garamond), Georgia, serif;
+  font-style: italic;
+  line-height: 1.55;
+}
+
+.museum-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.museum-tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.touch-range {
+  touch-action: manipulation;
+}
+
+.touch-range::-webkit-slider-runnable-track {
+  height: 6px;
+}
+
+.touch-range::-webkit-slider-thumb {
+  min-width: 24px;
+  min-height: 24px;
+}
+
+.touch-range::-moz-range-track {
+  height: 6px;
+}
+
+.touch-range::-moz-range-thumb {
+  width: 24px;
+  height: 24px;
+}
+
+.best-match-scroll {
+  -webkit-overflow-scrolling: touch;
 }

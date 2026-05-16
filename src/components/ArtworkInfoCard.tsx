@@ -23,23 +23,23 @@ export default function ArtworkInfoCard({ artwork, recommendation }: Props) {
     <div className="w-full rounded border border-neutral-200 bg-white/70 p-4 shadow-sm backdrop-blur">
 
       {/* Title row */}
-      <div className="flex items-baseline justify-between gap-3">
-        <h2 className="font-serif text-base font-medium leading-tight text-neutral-900">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between sm:gap-3">
+        <h2 className="museum-serif text-lg font-medium leading-tight text-neutral-900">
           {artwork.title}
         </h2>
         {artwork.year && (
-          <span className="shrink-0 text-[11px] text-neutral-400">{artwork.year}</span>
+          <span className="museum-tabular shrink-0 text-[11px] text-neutral-400">{artwork.year}</span>
         )}
       </div>
 
       {/* Artist + museum */}
-      <p className="mt-0.5 text-xs text-neutral-500">
+      <p className="museum-tabular mt-0.5 flex flex-wrap gap-x-2 gap-y-1 text-xs text-neutral-500 sm:block">
         {artwork.artist}
-        <span className="mx-1.5 text-neutral-300">·</span>
+        <span className="hidden text-neutral-300 sm:mx-1.5 sm:inline">·</span>
         Metropolitan Museum of Art, New York
         {dimensions && (
           <>
-            <span className="mx-1.5 text-neutral-300">·</span>
+            <span className="hidden text-neutral-300 sm:mx-1.5 sm:inline">·</span>
             {dimensions}
           </>
         )}
@@ -47,28 +47,28 @@ export default function ArtworkInfoCard({ artwork, recommendation }: Props) {
 
       {/* One-liner background */}
       {description && (
-        <p className="mt-2 text-xs leading-relaxed text-neutral-600">{description}</p>
+        <p className="museum-serif mt-2 max-w-[65ch] text-sm leading-[1.65] text-neutral-600">{description}</p>
       )}
 
       {/* Brushwork note */}
       {strokeNote && (
         <div className="mt-2 border-t border-neutral-100 pt-2">
-          <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-widest text-neutral-400">
+          <p className="museum-label mb-0.5 text-neutral-400">
             Brushwork
           </p>
-          <p className="text-xs leading-relaxed text-neutral-600">{strokeNote}</p>
+          <p className="museum-serif max-w-[65ch] text-sm leading-[1.65] text-neutral-600">{strokeNote}</p>
         </div>
       )}
 
       {/* Match reasons */}
       {reasons.length > 0 && (
         <div className="mt-3 border-t border-neutral-100 pt-2">
-          <p className="mb-1 text-[10px] font-semibold uppercase tracking-widest text-neutral-400">
+          <p className="museum-label mb-1 text-neutral-400">
             Why it matches your photo
           </p>
           <ul className="space-y-0.5">
             {reasons.slice(0, 2).map((r, i) => (
-              <li key={i} className="flex items-start gap-1.5 text-xs text-neutral-600">
+              <li key={i} className="museum-serif flex items-start gap-1.5 text-sm leading-[1.55] text-neutral-600">
                 <span className="mt-px text-neutral-300 select-none">—</span>
                 {r}
               </li>
