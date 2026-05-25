@@ -1,12 +1,12 @@
 "use client";
 
-import type { ArtworkMetadata } from "@/types/art";
-import type { ArtworkRecommendation } from "@/lib/artwork/matcher";
+import type { ArtworkMetadata } from "@/domain/artwork/types";
+import type { ArtworkRecommendation } from "@/domain/artwork/matcher";
 import {
   PAINTING_DESCRIPTIONS,
   PAINTING_DIMENSIONS,
   STROKE_DESCRIPTIONS,
-} from "@/lib/artwork/paintingInfo";
+} from "@/domain/artwork/paintingInfo";
 
 type Props = {
   artwork:        ArtworkMetadata;

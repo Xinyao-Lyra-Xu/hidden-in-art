@@ -1,28 +1,29 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { History, Shuffle, Upload } from "lucide-react";
 import CanvasRenderer from "@/components/CanvasRenderer";
 import ArtworkInfoCard from "@/components/ArtworkInfoCard";
-import { loadImageFromFile } from "@/lib/image/loadImage";
-import { loadLocalArtworks } from "@/lib/artwork/loadArtworks";
-import { analyzeImage } from "@/lib/artwork/analyzeImage";
-import { recommendArtworks } from "@/lib/artwork/matcher";
-import type { ArtworkMetadata } from "@/types/art";
-import type { ArtworkRecommendation } from "@/lib/artwork/matcher";
-
-const HISTORY_KEY = "hidden-in-art-history-v1";
-
-type HistoryItem = {
-  key: string;
-  photoThumb: string;
-  artworkId?: string;
-  artworkTitle: string;
-  artworkArtist: string;
-  artworkImage: string;
-  artwork?: ArtworkMetadata;
-  createdAt: number;
-};
+import UploadBox from "@/components/UploadBox";
+import Slider from "@/components/Slider";
+import ActionStrip from "@/components/ActionStrip";
+import HistoryGallery from "@/components/HistoryGallery";
+import PaletteCard from "@/components/PaletteCard";
+import { loadImageFromFile } from "@/infrastructure/image/loader";
+import { loadLocalArtworks } from "@/infrastructure/artwork/loader";
+import { analyzeImage } from "@/domain/image/analysis";
+import { recommendArtworks } from "@/domain/artwork/matcher";
+import { getArtworkThumbnailUrl } from "@/lib/artworkUrl";
+import { makePhotoThumb } from "@/lib/canvas";
+import {
+  buildHistoryItem,
+  addToHistory,
+  resolveArtworkFromHistory,
+  loadHistoryFromStorage,
+  saveHistoryToStorage,
+} from "@/application/history";
+import type { ArtworkMetadata } from "@/domain/artwork/types";
+import type { ArtworkRecommendation } from "@/domain/artwork/matcher";
+import type { HistoryItem } from "@/application/history";
 
 export default function Home() {
   const [artworks,        setArtworks]        = useState<ArtworkMetadata[]>([]);
@@ -44,7 +45,6 @@ export default function Home() {
   const prevBlobRef = useRef("");
   const patchTouchedRef = useRef(false);
 
-  // Load the painting library once on mount
   useEffect(() => {
     loadLocalArtworks().then(({ artworks, error }) => {
       setArtworks(artworks);
@@ -54,7 +54,6 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Revoke old blob URL when component unmounts
   useEffect(() => {
     const url = prevBlobRef.current;
     return () => { if (url.startsWith("blob:")) URL.revokeObjectURL(url); };
@@ -62,12 +61,7 @@ export default function Home() {
 
   useEffect(() => {
     queueMicrotask(() => {
-      try {
-        const raw = window.localStorage.getItem(HISTORY_KEY);
-        if (raw) setHistory(JSON.parse(raw) as HistoryItem[]);
-      } catch {
-        setHistory([]);
-      }
+      setHistory(loadHistoryFromStorage());
     });
   }, []);
 
@@ -83,28 +77,10 @@ export default function Home() {
     nextPhotoKey = photoKey,
   ) {
     if (!nextPhotoThumb || !nextPhotoKey) return;
-
-    const q = encodeURIComponent(
-      artwork.query ?? `${artwork.title} ${artwork.artist}`,
-    );
-    const item: HistoryItem = {
-      key: `${nextPhotoKey}-${artwork.id}`,
-      photoThumb: nextPhotoThumb,
-      artworkId: artwork.id,
-      artworkTitle: artwork.title,
-      artworkArtist: artwork.artist,
-      artworkImage: artwork.image || `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`,
-      artwork,
-      createdAt: 0,
-    };
-
+    const item = buildHistoryItem(artwork, nextPhotoThumb, nextPhotoKey);
     setHistory((prev) => {
-      const next = [item, ...prev.filter((x) => x.key !== item.key)].slice(0, 12);
-      try {
-        window.localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
-      } catch {
-        // Ignore private-mode or quota failures; the gallery is a nice-to-have.
-      }
+      const next = addToHistory(prev, item);
+      saveHistoryToStorage(next);
       return next;
     });
   }
@@ -115,25 +91,8 @@ export default function Home() {
     if (artwork) rememberArtwork(artwork);
   }
 
-  function artworkFromHistory(item: HistoryItem): ArtworkMetadata {
-    const found = artworks.find((artwork) =>
-      artwork.id === item.artworkId ||
-      (artwork.title === item.artworkTitle && artwork.artist === item.artworkArtist)
-    );
-    if (found) return found;
-    if (item.artwork) return item.artwork;
-    return {
-      id: item.artworkId ?? `history-${item.key}`,
-      title: item.artworkTitle,
-      artist: item.artworkArtist,
-      image: item.artworkImage,
-      tags: [],
-      palette: [],
-    };
-  }
-
   function handleHistorySelect(item: HistoryItem) {
-    selectArtworkAsTarget(artworkFromHistory(item));
+    selectArtworkAsTarget(resolveArtworkFromHistory(item, artworks));
   }
 
   async function handleFile(file: File) {
@@ -183,12 +142,6 @@ export default function Home() {
     selectArtworkAsTarget(next);
   }
 
-  const thumbnailSrc = (a: ArtworkMetadata) => {
-    if (a.thumbnail || a.image) return a.thumbnail ?? a.image ?? "";
-    const q = encodeURIComponent(a.query ?? `${a.title} ${a.artist}`);
-    return `/api/met-painting?id=${a.metId ?? 0}&q=${q}`;
-  };
-
   return (
     <main className="min-h-screen bg-[#f8f5ee] text-neutral-900">
       <section className="mx-auto flex max-w-4xl flex-col gap-8 px-4 py-12 sm:px-6">
@@ -204,7 +157,6 @@ export default function Home() {
 
         <div className="mx-auto w-full max-w-2xl rounded border border-neutral-200 bg-white/60 p-3 shadow-sm backdrop-blur sm:max-w-[720px] sm:p-6 min-[1025px]:max-w-2xl">
 
-          {/* Photo upload */}
           <div className="mb-6">
             <p className="museum-label mb-2 text-neutral-500">
               Your Photo
@@ -217,7 +169,6 @@ export default function Home() {
             />
           </div>
 
-          {/* Matched paintings — shown after upload */}
           {recommendations.length > 0 && (
             <div className="mb-6">
               <p className="museum-label mb-3 text-neutral-500">
@@ -242,7 +193,7 @@ export default function Home() {
                       <div className="relative aspect-square w-full overflow-hidden bg-neutral-100">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={thumbnailSrc(artwork)}
+                          src={getArtworkThumbnailUrl(artwork)}
                           alt={artwork.title}
                           loading="lazy"
                           className="h-full w-full object-cover"
@@ -278,7 +229,6 @@ export default function Home() {
             </div>
           )}
 
-          {/* Fallback selector — shown before upload or when library is loading */}
           {recommendations.length === 0 && (
             <div className="mb-6">
               <label
@@ -311,7 +261,6 @@ export default function Home() {
             </div>
           )}
 
-          {/* Patch count slider */}
           <Slider
             label="Patches / Threads"
             value={patchCount}
@@ -333,7 +282,6 @@ export default function Home() {
           )}
         </div>
 
-        {/* Scroll guide — appears after upload to direct attention downward */}
         {sourceImage && selectedArtwork && (
           <p className="museum-caption text-center text-sm text-neutral-500">
             ↓ Scroll down to see how{" "}
@@ -351,7 +299,6 @@ export default function Home() {
           />
         )}
 
-        {/* Color palette comparison — shown once user photo is available */}
         {sourceImage && selectedArtwork && userColors.length > 0 && (
           <PaletteCard
             artworkPalette={selectedArtwork.palette ?? []}
@@ -374,269 +321,5 @@ export default function Home() {
 
       </section>
     </main>
-  );
-}
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function UploadBox({
-  previewUrl,
-  fileName,
-  disabled,
-  onFile,
-}: {
-  previewUrl: string;
-  fileName: string;
-  disabled: boolean;
-  onFile: (f: File) => void;
-}) {
-  return (
-    <label
-      htmlFor="photo-upload"
-      className={`flex cursor-pointer touch-manipulation flex-col items-center justify-center rounded border border-dashed border-neutral-300 px-3 py-4 text-center transition hover:bg-white/70 sm:px-5 sm:py-8 ${
-        disabled ? "pointer-events-none opacity-50" : ""
-      }`}
-    >
-      <Upload className="mb-3 h-7 w-7 text-neutral-400" />
-      <span className="text-sm text-neutral-600">
-        {previewUrl ? "Change photo" : "Upload your photo"}
-      </span>
-      <span className="mt-1 text-xs text-neutral-400">JPG · PNG · WEBP</span>
-      <input
-        id="photo-upload"
-        type="file"
-        accept="image/jpeg,image/png,image/webp"
-        capture="environment"
-        className="hidden"
-        disabled={disabled}
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) onFile(f);
-        }}
-      />
-      {previewUrl && (
-        <div className="mt-4 overflow-hidden rounded border border-neutral-200 bg-neutral-50 shadow-sm">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={previewUrl}
-            alt=""
-            className="max-h-28 w-auto object-contain"
-          />
-          <p className="truncate px-2 py-1 text-xs text-neutral-400">{fileName}</p>
-        </div>
-      )}
-    </label>
-  );
-}
-
-function Slider({
-  label,
-  value,
-  min,
-  max,
-  step,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <label className="block text-sm text-neutral-700">
-      <span className="block">
-        {label}
-      </span>
-      <span className="museum-tabular mt-1 block font-medium">
-        {value}
-      </span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="touch-range mt-2 w-full accent-neutral-700"
-      />
-    </label>
-  );
-}
-
-function ActionStrip({
-  onTryPhoto,
-  onTryArtwork,
-  canTryArtwork,
-}: {
-  onTryPhoto: () => void;
-  onTryArtwork: () => void;
-  canTryArtwork: boolean;
-}) {
-  return (
-    <div className="mt-5 grid grid-cols-1 gap-2 border-t border-neutral-200 pt-5 sm:grid-cols-2">
-      <button
-        type="button"
-        onClick={onTryPhoto}
-        className="inline-flex min-h-12 touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition active:scale-[0.97] hover:bg-neutral-50 sm:min-h-0"
-      >
-        <Upload className="h-4 w-4" />
-        Try another photo
-      </button>
-      <button
-        type="button"
-        onClick={onTryArtwork}
-        disabled={!canTryArtwork}
-        className="inline-flex min-h-12 touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-700 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
-      >
-        <Shuffle className="h-4 w-4" />
-        Try another painting
-      </button>
-    </div>
-  );
-}
-
-function HistoryGallery({
-  items,
-  selectedArtwork,
-  onSelect,
-}: {
-  items: HistoryItem[];
-  selectedArtwork: ArtworkMetadata | null;
-  onSelect: (item: HistoryItem) => void;
-}) {
-  if (items.length === 0) return null;
-
-  return (
-    <section className="w-full">
-      <div className="mb-3 flex items-center gap-2">
-        <History className="h-4 w-4 text-neutral-500" />
-        <h2 className="museum-label text-neutral-500">
-          Personal Gallery
-        </h2>
-      </div>
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 min-[1025px]:grid-cols-3">
-        {items.map((item) => {
-          const isSelected =
-            selectedArtwork?.id === item.artworkId ||
-            (selectedArtwork?.title === item.artworkTitle &&
-              selectedArtwork?.artist === item.artworkArtist);
-          return (
-            <article
-              key={item.key}
-              role="button"
-              tabIndex={0}
-              aria-pressed={isSelected}
-              title={`Use ${item.artworkTitle} as the reconstruction target`}
-              onClick={() => onSelect(item)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSelect(item);
-                }
-              }}
-              className={`touch-manipulation overflow-hidden rounded border shadow-sm transition active:scale-[0.97] focus:outline-none focus:ring-2 focus:ring-neutral-700 ${
-                isSelected
-                  ? "cursor-pointer border-neutral-800 bg-white ring-2 ring-neutral-700"
-                  : "cursor-pointer border-neutral-200 bg-white/70 hover:border-neutral-500 hover:bg-white"
-              }`}
-            >
-              <div className="relative grid aspect-[4/3] grid-cols-2 bg-neutral-100">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={item.photoThumb} alt="" loading="lazy" className="h-full w-full object-cover" />
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={item.artworkImage}
-                  alt={item.artworkTitle}
-                  loading="lazy"
-                  className="h-full w-full object-cover"
-                />
-                {isSelected && (
-                  <span className="absolute left-2 top-2 rounded bg-white/90 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-800">
-                    Target
-                  </span>
-                )}
-              </div>
-              <div className="p-3">
-                <p className="museum-serif truncate text-base font-medium text-neutral-900">{item.artworkTitle}</p>
-                <p className="truncate text-xs text-neutral-500">{item.artworkArtist}</p>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function makePhotoThumb(img: HTMLImageElement): string {
-  const maxSide = 360;
-  const scale = Math.min(maxSide / img.width, maxSide / img.height, 1);
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(img.width * scale));
-  canvas.height = Math.max(1, Math.round(img.height * scale));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return "";
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/jpeg", 0.72);
-}
-
-function PaletteCard({
-  artworkPalette,
-  userColors,
-  artwork,
-}: {
-  artworkPalette: string[];
-  userColors:     string[];
-  artwork:        ArtworkMetadata;
-}) {
-  const artSwatches  = artworkPalette.slice(0, 5);
-  const userSwatches = userColors.slice(0, 5);
-
-  if (artSwatches.length === 0 && userSwatches.length === 0) return null;
-
-  return (
-    <div className="w-full rounded border border-neutral-200 bg-white/70 p-4 shadow-sm backdrop-blur">
-      <p className="museum-label mb-3 text-neutral-500">
-        Color Palette Match
-      </p>
-      <div className="flex flex-col gap-4 sm:flex-row sm:gap-6">
-        {artSwatches.length > 0 && (
-          <div className="flex-1">
-            <p className="museum-caption mb-1.5 truncate text-[11px] text-neutral-400">{artwork.title}</p>
-            <div className="flex gap-1">
-              {artSwatches.map((hex, i) => (
-                <div
-                  key={i}
-                  className="h-8 flex-1 rounded"
-                  style={{ backgroundColor: hex }}
-                  title={hex}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-        {userSwatches.length > 0 && (
-          <div className="flex-1">
-            <p className="mb-1.5 text-[11px] text-neutral-400">Your Photo</p>
-            <div className="flex gap-1">
-              {userSwatches.map((hex, i) => (
-                <div
-                  key={i}
-                  className="h-8 flex-1 rounded"
-                  style={{ backgroundColor: hex }}
-                  title={hex}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-      <p className="museum-caption mt-2 text-[11px] text-neutral-400">
-        The reconstruction maps each patch to the closest color in your photo, so similar tones
-        transfer naturally while the painting&apos;s overall palette stays recognizable.
-      </p>
-    </div>
   );
 }

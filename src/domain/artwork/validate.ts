@@ -1,4 +1,4 @@
-import type { ArtworkMetadata } from "@/types/art";
+import type { ArtworkMetadata } from "@/domain/artwork/types";
 
 export type ValidationResult = {
   valid: ArtworkMetadata[];
@@ -47,14 +47,12 @@ export function validateArtworkMetadata(raw: unknown): ValidationResult {
       }
     }
 
-    // palette must be an array if present; default to [] if missing
     if (obj.palette !== undefined && !Array.isArray(obj.palette)) {
       warnings.push(`${ref}: "palette" must be an array if provided, defaulting to [].`);
       obj.palette = [];
     }
     if (!Array.isArray(obj.palette)) obj.palette = [];
 
-    // tags must be an array if present; default to [] if missing
     if (obj.tags !== undefined && !Array.isArray(obj.tags)) {
       warnings.push(`${ref}: "tags" must be an array if provided, defaulting to [].`);
       obj.tags = [];

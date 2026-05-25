@@ -1,3 +1,6 @@
+// Image analysis runs in the browser — canvas is used to sample pixel data.
+// The math (Sobel filter, HSL conversion, color quantization) is pure domain logic.
+
 export type ImageAnalysis = {
   dominantColors:   string[];
   averageBrightness: number;  // [0,1]
@@ -46,7 +49,6 @@ function getCentralVsEdgeContrast(data: Uint8ClampedArray, W: number, H: number)
   return Math.abs(centralSum / centralCount - edgeLumSum / edgeCount);
 }
 
-// Local luminance variance across an 8×8 grid of cells
 function computeTextureDensity(data: Uint8ClampedArray, W: number, H: number): number {
   const GRID = 8;
   const cw = Math.max(1, Math.floor(W / GRID));
@@ -114,7 +116,6 @@ export function analyzeImage(img: HTMLImageElement): ImageAnalysis {
     colorBuckets.set(`${br},${bg},${bb}`, (colorBuckets.get(`${br},${bg},${bb}`) ?? 0) + 1);
   }
 
-  // Sobel edge density (sampled every 2 px)
   let edgeSum = 0, edgeSamples = 0;
   const lum = (x: number, y: number) => {
     const idx = (y * W + x) * 4;
