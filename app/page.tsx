@@ -144,7 +144,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#f8f5ee] text-neutral-900">
-      <section className="mx-auto flex max-w-4xl flex-col gap-8 px-4 py-12 sm:px-6">
+      <section className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-8 sm:gap-8 sm:px-6 sm:py-12">
 
         <header className="text-center">
           <h1 className="museum-display text-[3.4rem] leading-none md:text-[5.15rem]">
