@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Columns2, Download, Image as ImageIcon, RotateCcw } from "lucide-react";
-import type { ArtworkMetadata } from "@/types/art";
+import type { ArtworkMetadata } from "@/domain/artwork/types";
+import { getArtworkImageUrl } from "@/lib/artworkUrl";
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const CANVAS_W    = 900;
@@ -333,8 +334,7 @@ function PaintingLocator({
   artwork:   ArtworkMetadata;
   hoverNorm: { nx: number; ny: number } | null;
 }) {
-  const q   = encodeURIComponent(artwork.query ?? `${artwork.title} ${artwork.artist}`);
-  const src = `/api/met-painting?id=${artwork.metId ?? 0}&q=${q}`;
+  const src = getArtworkImageUrl(artwork);
 
   const hx = hoverNorm !== null
     ? focal.nx0 + hoverNorm.nx * (focal.nx1 - focal.nx0)
@@ -594,6 +594,8 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   const [statusLine,   setStatusLine]  = useState("Choose a painting to begin");
   const [isLoading,    setIsLoading]   = useState(false);
   const [isMobile,     setIsMobile]    = useState(false);
+  // Mirrors phasesRef so PatchPopup can read userCanvas during render without ref access.
+  const [renderPhases, setRenderPhases] = useState<PhasesData | null>(null);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 639px)");
@@ -605,6 +607,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
   // ── Load painting from Met API ──────────────────────────────────────────────
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!artwork) { setPd(null); setStatusLine("Choose a painting to begin"); return; }
 
     let cancelled = false;
@@ -613,10 +616,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     setPd(null);
 
     const img = new window.Image();
-    const imageSrc = artwork.image || (() => {
-      const q = artwork.query ?? `${artwork.title} ${artwork.artist}`;
-      return `/api/met-painting?id=${artwork.metId ?? 0}&q=${encodeURIComponent(q)}`;
-    })();
+    const imageSrc = getArtworkImageUrl(artwork);
     if (/^https?:\/\//i.test(imageSrc)) img.crossOrigin = "anonymous";
     img.onload = () => {
       if (cancelled) return;
@@ -654,6 +654,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     cancelAnimationFrame(rafRef.current);
 
     // Reset interactive overlay state on any input change
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCompareMode(false);
     compareModeRef.current = false;
     setClickedMatch(null);
@@ -669,6 +670,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       setFocal(null);
       layoutRef.current = null;
       phasesRef.current = null;
+      setRenderPhases(null);
       canvas.width        = CANVAS_W * dpr;
       canvas.height       = 600      * dpr;
       canvas.style.width  = `${CANVAS_W}px`;
@@ -698,6 +700,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       setFocal(null);
       layoutRef.current = null;
       phasesRef.current = null;
+      setRenderPhases(null);
       const reconW = Math.round(CANVAS_W * RECON_FRAC);
       const reconH = Math.round(reconW * 0.75);
       const reconX = Math.round((CANVAS_W - reconW) / 2);
@@ -782,8 +785,10 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const p2 = makePhase2(pd, computedFocal, cols, rows, reconW, reconH, patchR);
     const p3 = makePhase3(matches, userCanvas, reconW, reconH, patchR);
 
-    // Store phases for overlay features
-    phasesRef.current = { p1, p3, matches, userCanvas, patchR };
+    // Store phases for overlay features; mirror to state so render can read without ref access.
+    const newPhases = { p1, p3, matches, userCanvas, patchR };
+    phasesRef.current = newPhases;
+    setRenderPhases(newPhases);
 
     // ── Compare drawing (closed over ctx with DPR scale applied) ─────────────
     drawCompareRef.current = (norm: number) => {
@@ -1148,8 +1153,6 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     a.click();
   }
 
-  const phases = phasesRef.current;
-
   return (
     <div className="flex flex-col items-center gap-3">
       {focal && artwork && (
@@ -1177,10 +1180,10 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
           onClick={handleClick}
         />
         {/* Click-patch popup */}
-        {!compareMode && clickedMatch && phases && (
+        {!compareMode && clickedMatch && renderPhases && (
           <PatchPopup
             match={clickedMatch.match}
-            userCanvas={phases.userCanvas}
+            userCanvas={renderPhases.userCanvas}
             cssX={clickedMatch.cssX}
             cssY={clickedMatch.cssY}
             onClose={() => setClickedMatch(null)}

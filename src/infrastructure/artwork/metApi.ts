@@ -1,4 +1,6 @@
-import type { ArtworkMetadata } from "@/types/art";
+// Met Museum API client — used by build scripts (npm run build:paintings), not the browser bundle.
+
+import type { ArtworkMetadata } from "@/domain/artwork/types";
 
 const MET_BASE = "https://collectionapi.metmuseum.org/public/collection/v1";
 

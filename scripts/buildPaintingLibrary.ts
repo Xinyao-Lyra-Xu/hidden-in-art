@@ -14,8 +14,8 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { importMetArtworks } from "../src/lib/artwork/metApi";
-import type { ArtworkMetadata } from "../src/types/art";
+import { importMetArtworks } from "../src/infrastructure/artwork/metApi";
+import type { ArtworkMetadata } from "../src/domain/artwork/types";
 
 const OUT_PATH = path.join(process.cwd(), "public", "artworks", "met.metadata.json");
 

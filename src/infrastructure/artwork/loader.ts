@@ -1,5 +1,5 @@
-import type { ArtworkMetadata } from "@/types/art";
-import { validateArtworkMetadata } from "./validateArtworkMetadata";
+import type { ArtworkMetadata } from "@/domain/artwork/types";
+import { validateArtworkMetadata } from "@/domain/artwork/validate";
 
 export type LoadArtworksResult = {
   artworks: ArtworkMetadata[];

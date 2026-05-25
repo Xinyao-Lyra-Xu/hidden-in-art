@@ -1,5 +1,5 @@
-import type { ArtworkMetadata } from "@/types/art";
-import type { ImageAnalysis } from "./analyzeImage";
+import type { ArtworkMetadata } from "@/domain/artwork/types";
+import type { ImageAnalysis } from "@/domain/image/analysis";
 
 export type ScoreComponents = {
   palette: number;
