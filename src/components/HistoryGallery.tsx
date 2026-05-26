@@ -1,6 +1,6 @@
 "use client";
 
-import { History } from "lucide-react";
+import { History, Trash2 } from "lucide-react";
 import type { ArtworkMetadata } from "@/domain/artwork/types";
 import type { HistoryItem } from "@/application/history";
 
@@ -8,9 +8,10 @@ type Props = {
   items: HistoryItem[];
   selectedArtwork: ArtworkMetadata | null;
   onSelect: (item: HistoryItem) => void;
+  onDelete: (key: string) => void;
 };
 
-export default function HistoryGallery({ items, selectedArtwork, onSelect }: Props) {
+export default function HistoryGallery({ items, selectedArtwork, onSelect, onDelete }: Props) {
   if (items.length === 0) return null;
 
   return (
@@ -62,6 +63,25 @@ export default function HistoryGallery({ items, selectedArtwork, onSelect }: Pro
                     Target
                   </span>
                 )}
+                <button
+                  type="button"
+                  aria-label={`Delete "${item.artworkTitle}" from history`}
+                  title={`Delete "${item.artworkTitle}" from history`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(item.key);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onDelete(item.key);
+                    }
+                  }}
+                  className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded bg-white/80 text-neutral-400 shadow-sm transition hover:bg-white hover:text-red-500 focus:outline-none focus:ring-2 focus:ring-neutral-700 active:scale-95"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
               </div>
               <div className="p-3">
                 <p className="museum-serif truncate text-base font-medium text-neutral-900">{item.artworkTitle}</p>

@@ -17,6 +17,7 @@ import { makePhotoThumb } from "@/lib/canvas";
 import {
   buildHistoryItem,
   addToHistory,
+  removeFromHistory,
   resolveArtworkFromHistory,
   loadHistoryFromStorage,
   saveHistoryToStorage,
@@ -93,6 +94,14 @@ export default function Home() {
 
   function handleHistorySelect(item: HistoryItem) {
     selectArtworkAsTarget(resolveArtworkFromHistory(item, artworks));
+  }
+
+  function handleHistoryDelete(key: string) {
+    setHistory((prev) => {
+      const next = removeFromHistory(prev, key);
+      saveHistoryToStorage(next);
+      return next;
+    });
   }
 
   async function handleFile(file: File) {
@@ -317,6 +326,7 @@ export default function Home() {
           items={history}
           selectedArtwork={selectedArtwork}
           onSelect={handleHistorySelect}
+          onDelete={handleHistoryDelete}
         />
 
       </section>
