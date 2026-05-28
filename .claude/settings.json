@@ -3,7 +3,8 @@
     "allow": [
       "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\Owner\\\\OneDrive\\\\Desktop\\\\hidden-in-art\" -Force)",
       "Bash(Select-Object -Property Mode, Name)",
-      "Bash(Format-Table -AutoSize)"
+      "Bash(Format-Table -AutoSize)",
+      "Bash(npx eslint *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\Owner\\OneDrive\\Desktop\\hidden-in-art\\public"

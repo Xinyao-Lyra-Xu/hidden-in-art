@@ -1,15 +1,16 @@
 "use client";
 
-import { Camera, Upload } from "lucide-react";
+import { Camera, Loader2, Upload } from "lucide-react";
 
 type Props = {
   previewUrl: string;
   fileName: string;
   disabled: boolean;
+  isProcessing?: boolean;
   onFile: (f: File) => void;
 };
 
-export default function UploadBox({ previewUrl, fileName, disabled, onFile }: Props) {
+export default function UploadBox({ previewUrl, fileName, disabled, isProcessing = false, onFile }: Props) {
   function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (f) onFile(f);
@@ -30,11 +31,20 @@ export default function UploadBox({ previewUrl, fileName, disabled, onFile }: Pr
           disabled ? "pointer-events-none opacity-50" : ""
         }`}
       >
-        <Upload className="mb-3 h-7 w-7 text-neutral-400" />
-        <span className="text-sm text-neutral-600">
-          {previewUrl ? "Change photo" : "Upload your photo"}
-        </span>
-        <span className="mt-1 text-xs text-neutral-400">JPG · PNG · WEBP</span>
+        {isProcessing ? (
+          <>
+            <Loader2 className="mb-2 h-6 w-6 animate-spin text-neutral-400" aria-hidden="true" />
+            <span className="text-sm text-neutral-500">Analysing photo…</span>
+          </>
+        ) : (
+          <>
+            <Upload className="mb-3 h-7 w-7 text-neutral-400" aria-hidden="true" />
+            <span className="text-sm text-neutral-600">
+              {previewUrl ? "Change photo" : "Upload your photo"}
+            </span>
+            <span className="mt-1 text-xs text-neutral-400">JPG · PNG · WEBP</span>
+          </>
+        )}
         {previewUrl && (
           <div className="mt-4 overflow-hidden rounded border border-neutral-200 bg-neutral-50 shadow-sm">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -62,25 +72,32 @@ export default function UploadBox({ previewUrl, fileName, disabled, onFile }: Pr
           disabled ? "pointer-events-none opacity-50" : ""
         }`}
       >
-        <div className="flex w-full gap-3">
-          <label
-            htmlFor="photo-upload"
-            className="flex min-h-11 flex-1 cursor-pointer touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-600 transition hover:bg-white/70 active:scale-[0.97]"
-          >
-            <Upload className="h-4 w-4 shrink-0 text-neutral-400" />
-            {previewUrl ? "Change" : "From library"}
-          </label>
-
-          <label
-            htmlFor="photo-camera"
-            className="flex min-h-11 flex-1 cursor-pointer touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-600 transition hover:bg-white/70 active:scale-[0.97]"
-          >
-            <Camera className="h-4 w-4 shrink-0 text-neutral-400" />
-            Take photo
-          </label>
-        </div>
-
-        <span className="text-xs text-neutral-400">JPG · PNG · WEBP</span>
+        {isProcessing ? (
+          <div className="flex w-full items-center justify-center gap-2 py-1 text-sm text-neutral-500">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+            Analysing photo…
+          </div>
+        ) : (
+          <>
+            <div className="flex w-full gap-3">
+              <label
+                htmlFor="photo-upload"
+                className="flex min-h-11 flex-1 cursor-pointer touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-600 transition hover:bg-white/70 active:scale-[0.97]"
+              >
+                <Upload className="h-4 w-4 shrink-0 text-neutral-400" aria-hidden="true" />
+                {previewUrl ? "Change" : "From library"}
+              </label>
+              <label
+                htmlFor="photo-camera"
+                className="flex min-h-11 flex-1 cursor-pointer touch-manipulation items-center justify-center gap-2 rounded border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-600 transition hover:bg-white/70 active:scale-[0.97]"
+              >
+                <Camera className="h-4 w-4 shrink-0 text-neutral-400" aria-hidden="true" />
+                Take photo
+              </label>
+            </div>
+            <span className="text-xs text-neutral-400">JPG · PNG · WEBP</span>
+          </>
+        )}
 
         {previewUrl && (
           <div className="w-full overflow-hidden rounded border border-neutral-200 bg-neutral-50 shadow-sm">

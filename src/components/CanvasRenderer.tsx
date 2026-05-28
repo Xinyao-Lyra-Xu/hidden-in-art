@@ -23,11 +23,6 @@ const DOT_R_USER  = 2;
 const PHASE1_HOLD = 700;
 const PHASE_FADE  = 900;
 
-// Magnifier
-const LENS_DIAM = 140;
-const LENS_R    = LENS_DIAM / 2;
-const ZOOM      = 5;
-
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PaintData = { pixels: Uint8ClampedArray; w: number; h: number };
 
@@ -432,72 +427,6 @@ function fitCenteredText(
   ctx.fillText(text, x, y);
 }
 
-// ── Hover magnifier ───────────────────────────────────────────────────────────
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function HoverMagnifier({
-  match,
-  userCanvas,
-  cssX,
-  cssY,
-}: {
-  match:      GridMatch;
-  userCanvas: HTMLCanvasElement;
-  cssX:       number;
-  cssY:       number;
-}) {
-  const ref = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const c = ref.current;
-    if (!c) return;
-    const ctx = c.getContext("2d");
-    if (!ctx) return;
-
-    const srcR = LENS_R / ZOOM;
-    ctx.clearRect(0, 0, LENS_DIAM, LENS_DIAM);
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(LENS_R, LENS_R, LENS_R, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.drawImage(
-      userCanvas,
-      match.userNx * userCanvas.width  - srcR,
-      match.userNy * userCanvas.height - srcR,
-      srcR * 2, srcR * 2,
-      0, 0, LENS_DIAM, LENS_DIAM,
-    );
-    ctx.restore();
-
-    ctx.strokeStyle = "rgba(255,255,255,0.9)";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(LENS_R, LENS_R, LENS_R - 1, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.strokeStyle = "rgba(220,38,38,0.7)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(LENS_R - 7, LENS_R); ctx.lineTo(LENS_R + 7, LENS_R);
-    ctx.moveTo(LENS_R, LENS_R - 7); ctx.lineTo(LENS_R, LENS_R + 7);
-    ctx.stroke();
-  }, [match, userCanvas]);
-
-  return (
-    <div
-      className="pointer-events-none absolute z-10"
-      style={{ left: cssX - LENS_R, top: cssY - LENS_R, width: LENS_DIAM, height: LENS_DIAM }}
-    >
-      <canvas
-        ref={ref}
-        width={LENS_DIAM}
-        height={LENS_DIAM}
-        className="rounded-full shadow-lg"
-      />
-    </div>
-  );
-}
-
 // ── Patch popup ───────────────────────────────────────────────────────────────
 
 function PatchPopup({
@@ -553,8 +482,10 @@ function PatchPopup({
           Source pixel
         </p>
         <button
+          type="button"
           onClick={onClose}
-          className="text-xs leading-none text-neutral-400 hover:text-neutral-600"
+          aria-label="Close"
+          className="rounded text-xs leading-none text-neutral-400 hover:text-neutral-700 focus:outline-none focus:ring-1 focus:ring-neutral-400"
         >
           ✕
         </button>
@@ -631,20 +562,17 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
         id = octx.getImageData(0, 0, oc.width, oc.height);
       } catch {
         setPd(null);
-        console.warn("Target image failed to load:", artwork.title);
-        setStatusLine(`Could not reconstruct "${artwork.title}" because its image blocks canvas access.`);
+        setStatusLine(`Could not reconstruct "${artwork.title}" — its image source blocks canvas access.`);
         setIsLoading(false);
         return;
       }
       setPd({ pixels: new Uint8ClampedArray(id.data), w: oc.width, h: oc.height });
-      console.log("Target image loaded:", artwork.title);
       setStatusLine(`${artwork.title} — ${artwork.artist}`);
       setIsLoading(false);
     };
     img.onerror = () => {
       if (!cancelled) {
-        console.warn("Target image failed to load:", artwork.title);
-        setStatusLine(`Failed to load "${artwork.title}"`);
+        setStatusLine(`Could not load "${artwork.title}". Please try another painting.`);
         setIsLoading(false);
       }
     };
@@ -672,7 +600,10 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     // On mobile the canvas CSS width is limited by max-w-full (≈ viewport width).
     // Render the logical coordinate space at that smaller width so the height
     // scales proportionally — prevents the 2.5× vertical-stretch distortion.
-    const cw = isMobile ? Math.min(CANVAS_W, window.innerWidth - 32) : CANVAS_W;
+    // Use a direct matchMedia check so the very first draw (before isMobile state
+    // fires) already uses the correct mobile width, avoiding the initial flash.
+    const isMobileView = window.matchMedia("(max-width: 639px)").matches;
+    const cw = isMobileView ? Math.min(CANVAS_W, window.innerWidth - 32) : CANVAS_W;
     cwRef.current = cw;
 
     if (!pd) {
@@ -682,8 +613,17 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       setRenderPhases(null);
       canvas.width        = cw   * dpr;
       canvas.height       = 600  * dpr;
-      canvas.style.width  = `${cw}px`;
-      canvas.style.height = "600px";
+      // Mobile: use aspect-ratio so height scales with max-w-full width constraint.
+      // Desktop: keep explicit pixel dimensions (no visual change).
+      if (isMobileView) {
+        canvas.style.width       = "100%";
+        canvas.style.height      = "";
+        canvas.style.aspectRatio = `${cw} / 600`;
+      } else {
+        canvas.style.width       = `${cw}px`;
+        canvas.style.height      = "600px";
+        canvas.style.aspectRatio = "";
+      }
       ctx.scale(dpr, dpr);
       ctx.fillStyle = "#f5f2ee";
       ctx.fillRect(0, 0, cw, 600);
@@ -717,8 +657,15 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       const h = reconY + reconH + THREAD_GAP + 180 + BOTTOM_PAD;
       canvas.width        = cw * dpr;
       canvas.height       = h  * dpr;
-      canvas.style.width  = `${cw}px`;
-      canvas.style.height = `${h}px`;
+      if (isMobileView) {
+        canvas.style.width       = "100%";
+        canvas.style.height      = "";
+        canvas.style.aspectRatio = `${cw} / ${h}`;
+      } else {
+        canvas.style.width       = `${cw}px`;
+        canvas.style.height      = `${h}px`;
+        canvas.style.aspectRatio = "";
+      }
       ctx.scale(dpr, dpr);
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, cw, h);
@@ -875,8 +822,15 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
     canvas.width        = cw      * dpr;
     canvas.height       = canvasH * dpr;
-    canvas.style.width  = `${cw}px`;
-    canvas.style.height = `${canvasH}px`;
+    if (isMobileView) {
+      canvas.style.width       = "100%";
+      canvas.style.height      = "";
+      canvas.style.aspectRatio = `${cw} / ${canvasH}`;
+    } else {
+      canvas.style.width       = `${cw}px`;
+      canvas.style.height      = `${canvasH}px`;
+      canvas.style.aspectRatio = "";
+    }
     ctx.scale(dpr, dpr);
 
     ctx.fillStyle = "#ffffff";
@@ -1172,6 +1126,12 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       <div className="relative w-full" style={{ maxWidth: CANVAS_W }}>
         <canvas
           ref={canvasRef}
+          aria-label={
+            pd && sourceImage
+              ? `Reconstruction of your photo in the style of ${artwork?.title ?? "the selected painting"}`
+              : "Reconstruction canvas — upload a photo to see your result"
+          }
+          role="img"
           className="max-w-full touch-manipulation rounded shadow-md"
           style={{
             cursor: compareMode ? "ew-resize" : "crosshair",
@@ -1216,7 +1176,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
             className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
           >
             <Columns2 className="h-3.5 w-3.5" />
-            {compareMode ? "✕ Compare" : "⇔ Compare"}
+            {compareMode ? "Exit Compare" : "Compare"}
           </button>
           <button
             onClick={() => {
@@ -1227,7 +1187,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
             className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            ↺ Replay
+            Replay
           </button>
           <button
             onClick={handleExport}
