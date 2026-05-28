@@ -967,23 +967,21 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
             );
             ctx.restore();
           }
-          if (!isMobile) {
-            ctx.save();
-            ctx.strokeStyle = "rgba(110,100,90,0.28)";
-            ctx.lineWidth   = 0.65;
-            for (const p of threadPts) {
-              ctx.beginPath(); ctx.moveTo(p.ux, p.uy); ctx.lineTo(p.rx, p.ry); ctx.stroke();
-            }
-            ctx.restore();
-            ctx.save();
-            for (const p of threadPts) {
-              ctx.beginPath();
-              ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
-              ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fill();
-              ctx.strokeStyle = "rgba(0,0,0,0.20)"; ctx.lineWidth = 0.6; ctx.stroke();
-            }
-            ctx.restore();
+          ctx.save();
+          ctx.strokeStyle = "rgba(110,100,90,0.28)";
+          ctx.lineWidth   = 0.65;
+          for (const p of threadPts) {
+            ctx.beginPath(); ctx.moveTo(p.ux, p.uy); ctx.lineTo(p.rx, p.ry); ctx.stroke();
           }
+          ctx.restore();
+          ctx.save();
+          for (const p of threadPts) {
+            ctx.beginPath();
+            ctx.arc(p.ux, p.uy, DOT_R_USER, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fill();
+            ctx.strokeStyle = "rgba(0,0,0,0.20)"; ctx.lineWidth = 0.6; ctx.stroke();
+          }
+          ctx.restore();
         }
       };
 
