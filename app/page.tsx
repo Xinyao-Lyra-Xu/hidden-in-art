@@ -17,6 +17,7 @@ import { makePhotoThumb } from "@/lib/canvas";
 import {
   buildHistoryItem,
   addToHistory,
+  removeFromHistory,
   resolveArtworkFromHistory,
   loadHistoryFromStorage,
   saveHistoryToStorage,
@@ -41,6 +42,7 @@ export default function Home() {
   const [photoThumb,      setPhotoThumb]      = useState("");
   const [photoKey,        setPhotoKey]        = useState("");
   const [history,         setHistory]         = useState<HistoryItem[]>([]);
+  const [uploadError,     setUploadError]     = useState<string | null>(null);
 
   const prevBlobRef = useRef("");
   const patchTouchedRef = useRef(false);
@@ -86,7 +88,6 @@ export default function Home() {
   }
 
   function selectArtworkAsTarget(artwork: ArtworkMetadata | null) {
-    if (artwork) console.log("Selected artwork target:", artwork.title);
     setSelectedArtwork(artwork);
     if (artwork) rememberArtwork(artwork);
   }
@@ -95,8 +96,17 @@ export default function Home() {
     selectArtworkAsTarget(resolveArtworkFromHistory(item, artworks));
   }
 
+  function handleHistoryDelete(key: string) {
+    setHistory((prev) => {
+      const next = removeFromHistory(prev, key);
+      saveHistoryToStorage(next);
+      return next;
+    });
+  }
+
   async function handleFile(file: File) {
     setIsProcessing(true);
+    setUploadError(null);
     try {
       if (prevBlobRef.current.startsWith("blob:")) URL.revokeObjectURL(prevBlobRef.current);
       const blob = URL.createObjectURL(file);
@@ -117,14 +127,17 @@ export default function Home() {
         const recs = recommendArtworks(analysis, artworks, 5);
         setRecommendations(recs);
         if (recs.length > 0) {
-          selectArtworkAsTarget(recs[0].artwork);
+          // Use setSelectedArtwork directly so the remembered item always uses the
+          // fresh nextPhotoKey — calling selectArtworkAsTarget here would read the
+          // stale photoKey state (React batches updates) and create a duplicate entry.
+          setSelectedArtwork(recs[0].artwork);
           rememberArtwork(recs[0].artwork, nextPhotoThumb, nextPhotoKey);
         } else if (selectedArtwork) {
           rememberArtwork(selectedArtwork, nextPhotoThumb, nextPhotoKey);
         }
       }
     } catch {
-      alert("Failed to load image.");
+      setUploadError("Couldn't load this image. Please try a JPEG, PNG, or WebP file.");
     } finally {
       setIsProcessing(false);
     }
@@ -144,7 +157,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#f8f5ee] text-neutral-900">
-      <section className="mx-auto flex max-w-4xl flex-col gap-8 px-4 py-12 sm:px-6">
+      <section className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-8 sm:gap-8 sm:px-6 sm:py-12">
 
         <header className="text-center">
           <h1 className="museum-display text-[3.4rem] leading-none md:text-[5.15rem]">
@@ -165,8 +178,14 @@ export default function Home() {
               previewUrl={previewUrl}
               fileName={fileName}
               disabled={isProcessing}
+              isProcessing={isProcessing}
               onFile={handleFile}
             />
+            {uploadError && (
+              <p role="alert" className="mt-2 text-xs text-red-600">
+                {uploadError}
+              </p>
+            )}
           </div>
 
           {recommendations.length > 0 && (
@@ -317,6 +336,7 @@ export default function Home() {
           items={history}
           selectedArtwork={selectedArtwork}
           onSelect={handleHistorySelect}
+          onDelete={handleHistoryDelete}
         />
 
       </section>

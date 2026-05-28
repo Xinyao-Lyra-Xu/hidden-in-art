@@ -585,6 +585,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   const compareModeRef = useRef(false);
   const longPressRef   = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
+  // Tracks the effective logical canvas width (= CANVAS_W on desktop, smaller on mobile).
+  // Written by the draw effect, read by pointer-event handlers.
+  const cwRef = useRef(CANVAS_W);
 
   const [pd,           setPd]          = useState<PaintData | null>(null);
   const [focal,        setFocal]       = useState<FocalBox | null>(null);
@@ -666,25 +669,43 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
 
+    // On mobile the canvas CSS width is limited by max-w-full (≈ viewport width).
+    // Render the logical coordinate space at that smaller width so the height
+    // scales proportionally — prevents the 2.5× vertical-stretch distortion.
+    // Use a direct matchMedia check so the very first draw (before isMobile state
+    // fires) already uses the correct mobile width, avoiding the initial flash.
+    const isMobileView = window.matchMedia("(max-width: 639px)").matches;
+    const cw = isMobileView ? Math.min(CANVAS_W, window.innerWidth - 32) : CANVAS_W;
+    cwRef.current = cw;
+
     if (!pd) {
       setFocal(null);
       layoutRef.current = null;
       phasesRef.current = null;
       setRenderPhases(null);
-      canvas.width        = CANVAS_W * dpr;
-      canvas.height       = 600      * dpr;
-      canvas.style.width  = `${CANVAS_W}px`;
-      canvas.style.height = "600px";
+      canvas.width        = cw   * dpr;
+      canvas.height       = 600  * dpr;
+      // Mobile: use aspect-ratio so height scales with max-w-full width constraint.
+      // Desktop: keep explicit pixel dimensions (no visual change).
+      if (isMobileView) {
+        canvas.style.width       = "100%";
+        canvas.style.height      = "";
+        canvas.style.aspectRatio = `${cw} / 600`;
+      } else {
+        canvas.style.width       = `${cw}px`;
+        canvas.style.height      = "600px";
+        canvas.style.aspectRatio = "";
+      }
       ctx.scale(dpr, dpr);
       ctx.fillStyle = "#f5f2ee";
-      ctx.fillRect(0, 0, CANVAS_W, 600);
+      ctx.fillRect(0, 0, cw, 600);
       ctx.fillStyle    = "#a89888";
       ctx.font         = "italic 15px serif";
       ctx.textAlign    = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(
         isLoading ? "Loading painting…" : "Choose a painting to begin",
-        CANVAS_W / 2, 300,
+        cw / 2, 300,
       );
       return;
     }
@@ -701,18 +722,25 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       layoutRef.current = null;
       phasesRef.current = null;
       setRenderPhases(null);
-      const reconW = Math.round(CANVAS_W * RECON_FRAC);
+      const reconW = Math.round(cw * RECON_FRAC);
       const reconH = Math.round(reconW * 0.75);
-      const reconX = Math.round((CANVAS_W - reconW) / 2);
+      const reconX = Math.round((cw - reconW) / 2);
       const reconY = TOP_PAD;
       const h = reconY + reconH + THREAD_GAP + 180 + BOTTOM_PAD;
-      canvas.width        = CANVAS_W * dpr;
-      canvas.height       = h        * dpr;
-      canvas.style.width  = `${CANVAS_W}px`;
-      canvas.style.height = `${h}px`;
+      canvas.width        = cw * dpr;
+      canvas.height       = h  * dpr;
+      if (isMobileView) {
+        canvas.style.width       = "100%";
+        canvas.style.height      = "";
+        canvas.style.aspectRatio = `${cw} / ${h}`;
+      } else {
+        canvas.style.width       = `${cw}px`;
+        canvas.style.height      = `${h}px`;
+        canvas.style.aspectRatio = "";
+      }
       ctx.scale(dpr, dpr);
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, CANVAS_W, h);
+      ctx.fillRect(0, 0, cw, h);
       ctx.strokeStyle = "rgba(160,140,120,0.35)";
       ctx.setLineDash([4, 5]);
       ctx.strokeRect(reconX + 0.5, reconY + 0.5, reconW, reconH);
@@ -733,9 +761,9 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
     const focalW = computedFocal.nx1 - computedFocal.nx0;
     const focalH = computedFocal.ny1 - computedFocal.ny0;
-    const reconW = Math.round(CANVAS_W * RECON_FRAC);
+    const reconW = Math.round(cw * RECON_FRAC);
     const reconH = Math.round(reconW * focalH / focalW);
-    const reconX = Math.round((CANVAS_W - reconW) / 2);
+    const reconX = Math.round((cw - reconW) / 2);
     const reconY = TOP_PAD;
     layoutRef.current = { reconX, reconY, reconW, reconH };
 
@@ -750,18 +778,18 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const patchR    = Math.max(1.0, Math.min(cellDispW, cellDispH) * 0.56);
 
     const uAspect = userCanvas.height / userCanvas.width;
-    const userH   = Math.min(USER_MAX_H, Math.round(CANVAS_W * uAspect));
+    const userH   = Math.min(USER_MAX_H, Math.round(cw * uAspect));
     const userY   = reconY + reconH + THREAD_GAP;
     const canvasH = userY + userH + BOTTOM_PAD;
 
     const uScale = isMobile
-      ? Math.min(CANVAS_W / userCanvas.width, userH / userCanvas.height)
-      : Math.max(CANVAS_W / userCanvas.width, userH / userCanvas.height);
-    const uVisW  = isMobile ? userCanvas.width : CANVAS_W / uScale;
+      ? Math.min(cw / userCanvas.width, userH / userCanvas.height)
+      : Math.max(cw / userCanvas.width, userH / userCanvas.height);
+    const uVisW  = isMobile ? userCanvas.width : cw / uScale;
     const uVisH  = isMobile ? userCanvas.height : userH / uScale;
-    const uDrawW = isMobile ? userCanvas.width * uScale : CANVAS_W;
+    const uDrawW = isMobile ? userCanvas.width * uScale : cw;
     const uDrawH = isMobile ? userCanvas.height * uScale : userH;
-    const uDrawX = isMobile ? (CANVAS_W - uDrawW) / 2 : 0;
+    const uDrawX = isMobile ? (cw - uDrawW) / 2 : 0;
     const uDrawY = isMobile ? userY + (userH - uDrawH) / 2 : userY;
     const uCropX = isMobile ? 0 : (userCanvas.width - uVisW) / 2;
     const uCropY = isMobile ? 0 : (userCanvas.height - uVisH) / 2;
@@ -796,7 +824,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       const splitX = Math.round(norm * reconW);
 
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, CANVAS_W, canvasH);
+      ctx.fillRect(0, 0, cw, canvasH);
       ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
 
       // Left: painting crop
@@ -864,14 +892,21 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       ctx.restore();
     };
 
-    canvas.width        = CANVAS_W * dpr;
-    canvas.height       = canvasH  * dpr;
-    canvas.style.width  = `${CANVAS_W}px`;
-    canvas.style.height = `${canvasH}px`;
+    canvas.width        = cw      * dpr;
+    canvas.height       = canvasH * dpr;
+    if (isMobileView) {
+      canvas.style.width       = "100%";
+      canvas.style.height      = "";
+      canvas.style.aspectRatio = `${cw} / ${canvasH}`;
+    } else {
+      canvas.style.width       = `${cw}px`;
+      canvas.style.height      = `${canvasH}px`;
+      canvas.style.aspectRatio = "";
+    }
     ctx.scale(dpr, dpr);
 
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, CANVAS_W, canvasH);
+    ctx.fillRect(0, 0, cw, canvasH);
     ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
     ctx.drawImage(p1, reconX, reconY, reconW, reconH);
 
@@ -879,7 +914,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     startAnimRef.current = () => {
       cancelAnimationFrame(rafRef.current);
       ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, CANVAS_W, canvasH);
+      ctx.fillRect(0, 0, cw, canvasH);
       ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
 
       const startMs = performance.now();
@@ -994,7 +1029,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     if (!layout || !phases) return;
 
     const rect  = canvas.getBoundingClientRect();
-    const scale = CANVAS_W / rect.width;
+    const scale = cwRef.current / rect.width;
     const mx    = (clientX - rect.left) * scale;
     const my    = (clientY - rect.top) * scale;
     const { reconX, reconY, reconW, reconH } = layout;
@@ -1021,7 +1056,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     if (!layout) { setHoverNorm(null); return; }
 
     const rect  = e.currentTarget.getBoundingClientRect();
-    const scale = CANVAS_W / rect.width;
+    const scale = cwRef.current / rect.width;
     const mx    = (e.clientX - rect.left) * scale;
     const my    = (e.clientY - rect.top)  * scale;
     const { reconX, reconY, reconW, reconH } = layout;
@@ -1049,7 +1084,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const layout = layoutRef.current;
     if (!layout) return;
     const rect  = e.currentTarget.getBoundingClientRect();
-    const scale = CANVAS_W / rect.width;
+    const scale = cwRef.current / rect.width;
     const mx    = (e.clientX - rect.left) * scale;
     const my    = (e.clientY - rect.top)  * scale;
     const { reconX, reconY, reconW, reconH } = layout;

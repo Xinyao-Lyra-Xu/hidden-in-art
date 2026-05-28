@@ -1,5 +1,7 @@
 "use client";
 
+import type { CSSProperties } from "react";
+
 type Props = {
   label: string;
   value: number;
@@ -10,6 +12,7 @@ type Props = {
 };
 
 export default function Slider({ label, value, min, max, step, onChange }: Props) {
+  const pct = ((value - min) / (max - min)) * 100;
   return (
     <label className="block text-sm text-neutral-700">
       <span className="block">
@@ -25,7 +28,8 @@ export default function Slider({ label, value, min, max, step, onChange }: Props
         step={step}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="touch-range mt-2 w-full accent-neutral-700"
+        style={{ "--slider-pct": `${pct}%` } as CSSProperties}
+        className="touch-range mt-2 w-full"
       />
     </label>
   );

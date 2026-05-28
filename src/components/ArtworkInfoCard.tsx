@@ -47,7 +47,7 @@ export default function ArtworkInfoCard({ artwork, recommendation }: Props) {
 
       {/* One-liner background */}
       {description && (
-        <p className="museum-serif mt-2 max-w-[65ch] text-sm leading-[1.65] text-neutral-600">{description}</p>
+        <p className="museum-serif mt-2 text-sm leading-[1.65] text-neutral-600">{description}</p>
       )}
 
       {/* Brushwork note */}
@@ -56,7 +56,7 @@ export default function ArtworkInfoCard({ artwork, recommendation }: Props) {
           <p className="museum-label mb-0.5 text-neutral-400">
             Brushwork
           </p>
-          <p className="museum-serif max-w-[65ch] text-sm leading-[1.65] text-neutral-600">{strokeNote}</p>
+          <p className="museum-serif text-sm leading-[1.65] text-neutral-600">{strokeNote}</p>
         </div>
       )}
 

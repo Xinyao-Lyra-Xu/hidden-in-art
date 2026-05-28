@@ -36,6 +36,10 @@ export function addToHistory(prev: HistoryItem[], item: HistoryItem): HistoryIte
   return [item, ...prev.filter((x) => x.key !== item.key)].slice(0, HISTORY_MAX);
 }
 
+export function removeFromHistory(prev: HistoryItem[], key: string): HistoryItem[] {
+  return prev.filter((x) => x.key !== key);
+}
+
 export function resolveArtworkFromHistory(
   item: HistoryItem,
   artworks: ArtworkMetadata[],

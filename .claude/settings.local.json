@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(cmd /c \"dir /s /b src app scripts 2>nul | findstr /v node_modules\")"
     ]
   }
 }
