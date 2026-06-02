@@ -12,6 +12,9 @@ import { loadImageFromFile } from "@/infrastructure/image/loader";
 import { loadLocalArtworks } from "@/infrastructure/artwork/loader";
 import { analyzeImage } from "@/domain/image/analysis";
 import { recommendArtworks } from "@/domain/artwork/matcher";
+import { recommendByHistogram } from "@/domain/artwork/matcherHistogram";
+import { recommendByKmeans } from "@/domain/artwork/matcherKmeans";
+import { recommendBySpatial } from "@/domain/artwork/matcherSpatial";
 import { getArtworkThumbnailUrl } from "@/lib/artworkUrl";
 import { makePhotoThumb } from "@/lib/canvas";
 import {
@@ -22,13 +25,22 @@ import {
   loadHistoryFromStorage,
   saveHistoryToStorage,
 } from "@/application/history";
+import MethodPicker from "@/components/MethodPicker";
 import type { ArtworkMetadata } from "@/domain/artwork/types";
 import type { ArtworkRecommendation } from "@/domain/artwork/matcher";
 import type { HistoryItem } from "@/application/history";
+import type { MatchMethod } from "@/domain/matching/strategy";
+import type { ScoreComponents } from "@/domain/artwork/matcher";
+
+const EMPTY_COMPONENTS: ScoreComponents = {
+  palette: 0, brightness: 0, saturation: 0, warmth: 0,
+  texture: 0, edgeDensity: 0, reconstructability: 0, typeMatch: 0,
+};
 
 export default function Home() {
   const [artworks,        setArtworks]        = useState<ArtworkMetadata[]>([]);
   const [libraryError,    setLibraryError]    = useState<string | null>(null);
+  const [matchMethod,     setMatchMethod]     = useState<MatchMethod>("hand-crafted");
 
   const [sourceImage,     setSourceImage]     = useState<HTMLImageElement | null>(null);
   const [previewUrl,      setPreviewUrl]       = useState("");
@@ -46,6 +58,7 @@ export default function Home() {
 
   const prevBlobRef = useRef("");
   const patchTouchedRef = useRef(false);
+  const sourceImageRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     loadLocalArtworks().then(({ artworks, error }) => {
@@ -104,6 +117,35 @@ export default function Home() {
     });
   }
 
+  function runRecommendations(img: HTMLImageElement, method: MatchMethod, artworkList: ArtworkMetadata[]): ArtworkRecommendation[] {
+    if (artworkList.length === 0) return [];
+    if (method === "histogram") {
+      return recommendByHistogram(img, artworkList, 5).map((r) => ({
+        artwork: r.artwork, score: r.score, components: EMPTY_COMPONENTS, reasons: [],
+      }));
+    }
+    if (method === "kmeans") {
+      return recommendByKmeans(img, artworkList, 5).map((r) => ({
+        artwork: r.artwork, score: r.score, components: EMPTY_COMPONENTS, reasons: [],
+      }));
+    }
+    if (method === "spatial") {
+      return recommendBySpatial(img, artworkList, 5).map((r) => ({
+        artwork: r.artwork, score: r.score, components: EMPTY_COMPONENTS, reasons: [],
+      }));
+    }
+    return recommendArtworks(analyzeImage(img), artworkList, 5);
+  }
+
+  function handleMethodChange(method: MatchMethod) {
+    setMatchMethod(method);
+    if (sourceImageRef.current && artworks.length > 0) {
+      const recs = runRecommendations(sourceImageRef.current, method, artworks);
+      setRecommendations(recs);
+      if (recs.length > 0) setSelectedArtwork(recs[0].artwork);
+    }
+  }
+
   async function handleFile(file: File) {
     setIsProcessing(true);
     setUploadError(null);
@@ -115,6 +157,7 @@ export default function Home() {
       setFileName(file.name);
 
       const img = await loadImageFromFile(file);
+      sourceImageRef.current = img;
       setSourceImage(img);
       const nextPhotoThumb = makePhotoThumb(img);
       const nextPhotoKey = `${file.name}-${file.size}-${file.lastModified}`;
@@ -122,9 +165,11 @@ export default function Home() {
       setPhotoKey(nextPhotoKey);
 
       if (artworks.length > 0) {
+        // Always show dominant colors from analysis
         const analysis = analyzeImage(img);
         setUserColors(analysis.dominantColors);
-        const recs = recommendArtworks(analysis, artworks, 5);
+
+        const recs = runRecommendations(img, matchMethod, artworks);
         setRecommendations(recs);
         if (recs.length > 0) {
           // Use setSelectedArtwork directly so the remembered item always uses the
@@ -187,6 +232,10 @@ export default function Home() {
               </p>
             )}
           </div>
+
+          {sourceImage && (
+            <MethodPicker value={matchMethod} onChange={handleMethodChange} />
+          )}
 
           {recommendations.length > 0 && (
             <div className="mb-6">
