@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import CanvasRenderer from "@/components/CanvasRenderer";
+import AgentChat from "@/components/AgentChat";
 import ArtworkInfoCard from "@/components/ArtworkInfoCard";
 import UploadBox from "@/components/UploadBox";
 import Slider from "@/components/Slider";
@@ -17,6 +18,9 @@ import { recommendByKmeans } from "@/domain/artwork/matcherKmeans";
 import { recommendBySpatial } from "@/domain/artwork/matcherSpatial";
 import { getArtworkThumbnailUrl } from "@/lib/artworkUrl";
 import { makePhotoThumb } from "@/lib/canvas";
+import { toAgentLibrary } from "@/lib/agentApi";
+import { DEFAULT_SETTINGS } from "@/domain/agent/types";
+import type { AgentSettings } from "@/domain/agent/types";
 import {
   buildHistoryItem,
   addToHistory,
@@ -55,6 +59,26 @@ export default function Home() {
   const [photoKey,        setPhotoKey]        = useState("");
   const [history,         setHistory]         = useState<HistoryItem[]>([]);
   const [uploadError,     setUploadError]     = useState<string | null>(null);
+  // Agent-only settings (colorMatch / abstraction / focalRegion) that the page
+  // doesn't otherwise track. patchCount and target live in their own state and
+  // are merged in at call time.
+  const [agentExtras,     setAgentExtras]     = useState<AgentSettings>(DEFAULT_SETTINGS);
+
+  const agentLibrary = useMemo(() => toAgentLibrary(artworks), [artworks]);
+  const agentSettings: AgentSettings = {
+    ...agentExtras,
+    patchCount,
+    targetArtworkId: selectedArtwork?.id ?? null,
+  };
+
+  function applyAgentSettings(next: AgentSettings) {
+    setAgentExtras(next);
+    setPatchCount(next.patchCount);
+    if (next.targetArtworkId) {
+      const match = artworks.find((a) => a.id === next.targetArtworkId);
+      if (match) selectArtworkAsTarget(match);
+    }
+  }
 
   const prevBlobRef = useRef("");
   const patchTouchedRef = useRef(false);
@@ -349,6 +373,13 @@ export default function Home() {
             />
           )}
         </div>
+
+        <AgentChat
+          settings={agentSettings}
+          library={agentLibrary}
+          onApply={applyAgentSettings}
+          disabled={artworks.length === 0}
+        />
 
         {sourceImage && selectedArtwork && (
           <p className="museum-caption text-center text-sm text-neutral-500">
