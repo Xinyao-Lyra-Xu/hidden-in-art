@@ -18,7 +18,12 @@ export async function POST(request: NextRequest) {
   const log = createLogger({ base: { requestId, route: "/api/agent" } });
   const startedAt = Date.now();
 
-  let body: { message?: unknown; settings?: unknown; library?: unknown };
+  let body: {
+    message?: unknown;
+    settings?: unknown;
+    library?: unknown;
+    history?: unknown;
+  };
   try {
     body = await request.json();
   } catch {
@@ -61,6 +66,7 @@ export async function POST(request: NextRequest) {
       message: body.message,
       settings: body.settings,
       library: body.library,
+      history: body.history,
       callLlm,
       onEvent: (event) => log.debug("agent event", { ...event }),
     });

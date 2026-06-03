@@ -39,13 +39,16 @@ export default function AgentChat({ settings, library, onApply, disabled }: Prop
     const message = text.trim();
     if (!message || busy || disabled) return;
 
+    // Snapshot prior turns as conversational memory before appending this one.
+    const history = messages.map((m) => ({ role: m.role, text: m.text }));
+
     setInput("");
     setError(null);
     setMessages((prev) => [...prev, { role: "user", text: message }]);
     setBusy(true);
 
     try {
-      const res = await sendAgentTurn({ message, settings, library });
+      const res = await sendAgentTurn({ message, settings, library, history });
       onApply(res.settings);
       setMessages((prev) => [
         ...prev,

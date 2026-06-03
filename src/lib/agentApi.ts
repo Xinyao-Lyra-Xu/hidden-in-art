@@ -25,10 +25,14 @@ export type AgentTurnResponse = {
   toolCalls: ToolCallRecord[];
 };
 
+// Prior turns sent back so the agent has conversational memory. Text-only.
+export type ChatHistoryEntry = { role: "user" | "assistant"; text: string };
+
 export async function sendAgentTurn(args: {
   message: string;
   settings: AgentSettings;
   library: AgentArtwork[];
+  history?: ChatHistoryEntry[];
   signal?: AbortSignal;
 }): Promise<AgentTurnResponse> {
   const res = await fetch("/api/agent", {
@@ -38,6 +42,7 @@ export async function sendAgentTurn(args: {
       message: args.message,
       settings: args.settings,
       library: args.library,
+      history: args.history ?? [],
     }),
     signal: args.signal,
   });

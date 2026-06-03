@@ -119,13 +119,19 @@ export async function runAgentTurn(args: {
   library: AgentArtwork[];
   maxSteps?: number;
   onEvent?: (event: AgentEvent) => void;
+  // Prior conversation turns (text-only, no tool scaffolding) to give the model
+  // memory across messages. Validated/capped upstream in the application layer.
+  history?: Message[];
 }): Promise<AgentTurnResult> {
   const { userMessage, callLlm, library } = args;
   const maxSteps = args.maxSteps ?? DEFAULT_MAX_STEPS;
   const emit = args.onEvent ?? (() => {});
 
   let settings: AgentSettings = { ...args.settings };
-  const messages: Message[] = [{ role: "user", content: userMessage }];
+  const messages: Message[] = [
+    ...(args.history ?? []),
+    { role: "user", content: userMessage },
+  ];
   const toolCalls: ToolCallRecord[] = [];
 
   for (let step = 0; step < maxSteps; step++) {
