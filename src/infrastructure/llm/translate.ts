@@ -12,6 +12,7 @@ import type {
   LlmResponse,
   Message,
   TextBlock,
+  TokenUsage,
   ToolUseBlock,
 } from "@/domain/agent/runner";
 import type { ToolDefinition } from "@/domain/agent/tools";
@@ -48,7 +49,21 @@ export type OpenAiResponseBody = {
       tool_calls?: OpenAiToolCall[];
     };
   }[];
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
 };
+
+function toTokenUsage(usage: OpenAiResponseBody["usage"]): TokenUsage | undefined {
+  if (!usage) return undefined;
+  return {
+    promptTokens: usage.prompt_tokens ?? 0,
+    completionTokens: usage.completion_tokens ?? 0,
+    totalTokens: usage.total_tokens ?? 0,
+  };
+}
 
 export function toOpenAiTools(tools: ToolDefinition[]): OpenAiTool[] {
   return tools.map((t) => ({
@@ -125,6 +140,7 @@ function parseArguments(raw: string): Record<string, unknown> {
 export function fromOpenAiResponse(body: OpenAiResponseBody): LlmResponse {
   const message = body.choices?.[0]?.message;
   const toolCalls = message?.tool_calls ?? [];
+  const usage = toTokenUsage(body.usage);
 
   if (toolCalls.length > 0) {
     const content: ContentBlock[] = [];
@@ -137,11 +153,12 @@ export function fromOpenAiResponse(body: OpenAiResponseBody): LlmResponse {
         input: parseArguments(call.function.arguments),
       });
     }
-    return { stop_reason: "tool_use", content };
+    return { stop_reason: "tool_use", content, usage };
   }
 
   return {
     stop_reason: "end_turn",
     content: [{ type: "text", text: message?.content ?? "" }],
+    usage,
   };
 }

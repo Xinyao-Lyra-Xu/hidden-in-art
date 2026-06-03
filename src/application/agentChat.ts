@@ -6,7 +6,12 @@
 // this is unit-testable offline with a scripted caller — the route supplies the
 // real provider-backed caller.
 
-import { runAgentTurn, type AgentTurnResult, type LlmCaller } from "@/domain/agent/runner";
+import {
+  runAgentTurn,
+  type AgentEvent,
+  type AgentTurnResult,
+  type LlmCaller,
+} from "@/domain/agent/runner";
 import { DEFAULT_SETTINGS, type AgentArtwork, type AgentSettings } from "@/domain/agent/types";
 
 export const MAX_MESSAGE_LENGTH = 2000;
@@ -38,6 +43,7 @@ export type ChatTurnInput = {
   library: unknown;
   callLlm: LlmCaller;
   maxSteps?: number;
+  onEvent?: (event: AgentEvent) => void;
 };
 
 export async function runChatTurn(input: ChatTurnInput): Promise<AgentTurnResult> {
@@ -66,5 +72,6 @@ export async function runChatTurn(input: ChatTurnInput): Promise<AgentTurnResult
     library,
     callLlm: input.callLlm,
     maxSteps: input.maxSteps,
+    onEvent: input.onEvent,
   });
 }

@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { resolveLlmConfig, MissingLlmKeyError } from "@/infrastructure/llm/config";
 import { createOpenAiCompatCaller } from "@/infrastructure/llm/openaiCompatCaller";
+import { withRetry } from "@/infrastructure/llm/retry";
+import { createLogger, newRequestId } from "@/infrastructure/observability/logger";
 import { runChatTurn, AgentInputError } from "@/application/agentChat";
 
 // Conversational art-agent endpoint. The LLM API key lives only here on the
@@ -12,23 +14,43 @@ import { runChatTurn, AgentInputError } from "@/application/agentChat";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
+  const requestId = newRequestId();
+  const log = createLogger({ base: { requestId, route: "/api/agent" } });
+  const startedAt = Date.now();
+
   let body: { message?: unknown; settings?: unknown; library?: unknown };
   try {
     body = await request.json();
   } catch {
-    return Response.json({ error: "Request body must be valid JSON." }, { status: 400 });
+    log.warn("bad json body");
+    return Response.json(
+      { error: "Request body must be valid JSON." },
+      { status: 400, headers: { "x-request-id": requestId } },
+    );
   }
 
-  // Build the provider-backed caller from server-side env. A missing key is an
+  // Build the provider-backed caller from server-side env, wrapped with retry so
+  // transient 429/5xx/timeouts don't surface to the user. A missing key is an
   // operator configuration problem, not a client error.
   let callLlm;
   try {
-    callLlm = createOpenAiCompatCaller(resolveLlmConfig());
+    const config = resolveLlmConfig();
+    log.info("turn start", { provider: config.provider, model: config.model });
+    callLlm = withRetry(createOpenAiCompatCaller(config), {
+      maxAttempts: 3,
+      onRetry: ({ attempt, delayMs, error }) =>
+        log.warn("retrying llm call", {
+          attempt,
+          delayMs,
+          reason: error instanceof Error ? error.message.slice(0, 200) : String(error),
+        }),
+    });
   } catch (err) {
     if (err instanceof MissingLlmKeyError) {
+      log.error("llm not configured", { error: err.message });
       return Response.json(
         { error: "The studio assistant isn't configured on the server yet." },
-        { status: 500 },
+        { status: 500, headers: { "x-request-id": requestId } },
       );
     }
     throw err;
@@ -40,21 +62,37 @@ export async function POST(request: NextRequest) {
       settings: body.settings,
       library: body.library,
       callLlm,
+      onEvent: (event) => log.debug("agent event", { ...event }),
     });
-    return Response.json({
-      reply: result.reply,
-      settings: result.settings,
-      toolCalls: result.toolCalls,
+    log.info("turn ok", {
+      ms: Date.now() - startedAt,
+      toolCalls: result.toolCalls.length,
+      replyChars: result.reply.length,
     });
+    return Response.json(
+      {
+        reply: result.reply,
+        settings: result.settings,
+        toolCalls: result.toolCalls,
+      },
+      { headers: { "x-request-id": requestId } },
+    );
   } catch (err) {
     if (err instanceof AgentInputError) {
-      return Response.json({ error: err.message }, { status: 400 });
+      log.warn("invalid input", { error: err.message });
+      return Response.json(
+        { error: err.message },
+        { status: 400, headers: { "x-request-id": requestId } },
+      );
     }
     // Upstream LLM failure / timeout — keep details out of the client response.
-    console.error("[api/agent] turn failed:", err);
+    log.error("turn failed", {
+      ms: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return Response.json(
       { error: "The studio assistant is unavailable right now. Please try again." },
-      { status: 502 },
+      { status: 502, headers: { "x-request-id": requestId } },
     );
   }
 }

@@ -4,6 +4,7 @@
 // without a network round-trip.
 
 import type { LlmCaller } from "@/domain/agent/runner";
+import { LlmHttpError, LlmTimeoutError, parseRetryAfterMs } from "./errors";
 import {
   fromOpenAiResponse,
   toOpenAiMessages,
@@ -20,7 +21,13 @@ export type FetchLike = (
     body: string;
     signal?: AbortSignal;
   },
-) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
+) => Promise<{
+  ok: boolean;
+  status: number;
+  text: () => Promise<string>;
+  // Real fetch Responses expose this; tests may omit it. Used to read Retry-After.
+  headers?: { get: (name: string) => string | null };
+}>;
 
 export type OpenAiCompatConfig = {
   baseUrl: string;
@@ -47,7 +54,11 @@ export function createOpenAiCompatCaller(config: OpenAiCompatConfig): LlmCaller 
     };
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
     try {
       const res = await doFetch(endpoint(config.baseUrl), {
         method: "POST",
@@ -61,7 +72,8 @@ export function createOpenAiCompatCaller(config: OpenAiCompatConfig): LlmCaller 
 
       const raw = await res.text();
       if (!res.ok) {
-        throw new Error(`LLM request failed (${res.status}): ${raw.slice(0, 500)}`);
+        const retryAfterMs = parseRetryAfterMs(res.headers?.get("retry-after"));
+        throw new LlmHttpError(res.status, raw, retryAfterMs);
       }
 
       let parsed: OpenAiResponseBody;
@@ -71,6 +83,10 @@ export function createOpenAiCompatCaller(config: OpenAiCompatConfig): LlmCaller 
         throw new Error(`LLM returned non-JSON response: ${raw.slice(0, 200)}`);
       }
       return fromOpenAiResponse(parsed);
+    } catch (err) {
+      // An abort we triggered is a timeout; re-wrap so the retry layer sees it.
+      if (timedOut) throw new LlmTimeoutError(timeoutMs);
+      throw err;
     } finally {
       clearTimeout(timer);
     }

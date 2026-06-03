@@ -30,9 +30,16 @@ export type Message = {
   content: string | ContentBlock[];
 };
 
+export type TokenUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 export type LlmResponse = {
   stop_reason: "tool_use" | "end_turn";
   content: ContentBlock[];
+  usage?: TokenUsage;
 };
 
 export type LlmCaller = (args: {
@@ -55,7 +62,23 @@ export type AgentTurnResult = {
   messages: Message[];
 };
 
+// Observability events emitted during a turn. The runner stays free of any
+// logger or I/O — it just calls an injected sink if one is provided, so the
+// route can wire these to structured logs while tests stay silent.
+export type AgentEvent =
+  | { type: "llm_call_start"; step: number }
+  | { type: "llm_call_end"; step: number; stopReason: string; ms: number; usage?: TokenUsage }
+  | { type: "tool_call"; step: number; name: string; ok: boolean; ms: number }
+  | { type: "turn_end"; steps: number; toolCalls: number; replyChars: number }
+  | { type: "max_steps"; steps: number };
+
 const DEFAULT_MAX_STEPS = 8;
+
+// Monotonic clock with a wall-clock fallback for environments without it.
+const nowMs = (): number =>
+  typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
 
 export function buildSystemPrompt(settings: AgentSettings, library: AgentArtwork[]): string {
   const target = settings.targetArtworkId ?? "none";
@@ -95,25 +118,38 @@ export async function runAgentTurn(args: {
   settings: AgentSettings;
   library: AgentArtwork[];
   maxSteps?: number;
+  onEvent?: (event: AgentEvent) => void;
 }): Promise<AgentTurnResult> {
   const { userMessage, callLlm, library } = args;
   const maxSteps = args.maxSteps ?? DEFAULT_MAX_STEPS;
+  const emit = args.onEvent ?? (() => {});
 
   let settings: AgentSettings = { ...args.settings };
   const messages: Message[] = [{ role: "user", content: userMessage }];
   const toolCalls: ToolCallRecord[] = [];
 
   for (let step = 0; step < maxSteps; step++) {
+    emit({ type: "llm_call_start", step });
+    const startedAt = nowMs();
     const response = await callLlm({
       system: buildSystemPrompt(settings, library),
       messages,
       tools: ART_AGENT_TOOLS,
     });
+    emit({
+      type: "llm_call_end",
+      step,
+      stopReason: response.stop_reason,
+      ms: Math.round(nowMs() - startedAt),
+      usage: response.usage,
+    });
 
     messages.push({ role: "assistant", content: response.content });
 
     if (response.stop_reason !== "tool_use") {
-      return { reply: textOf(response.content), settings, toolCalls, messages };
+      const reply = textOf(response.content);
+      emit({ type: "turn_end", steps: step + 1, toolCalls: toolCalls.length, replyChars: reply.length });
+      return { reply, settings, toolCalls, messages };
     }
 
     const toolUses = response.content.filter(
@@ -122,8 +158,16 @@ export async function runAgentTurn(args: {
     const results: ToolResultBlock[] = [];
 
     for (const use of toolUses) {
+      const toolStartedAt = nowMs();
       const result = executeTool(use.name, use.input, { settings, library });
       if (result.ok) settings = { ...settings, ...result.patch };
+      emit({
+        type: "tool_call",
+        step,
+        name: use.name,
+        ok: result.ok,
+        ms: Math.round(nowMs() - toolStartedAt),
+      });
       toolCalls.push({
         name: use.name,
         ok: result.ok,
@@ -143,8 +187,12 @@ export async function runAgentTurn(args: {
 
   // Ran out of steps without a plain-text answer — return a graceful fallback so
   // the caller always gets a non-empty reply instead of an endless loop.
+  emit({ type: "max_steps", steps: maxSteps });
+  const reply =
+    "I've made several adjustments — take a look and tell me what to tweak next.";
+  emit({ type: "turn_end", steps: maxSteps, toolCalls: toolCalls.length, replyChars: reply.length });
   return {
-    reply: "I've made several adjustments — take a look and tell me what to tweak next.",
+    reply,
     settings,
     toolCalls,
     messages,
