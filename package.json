@@ -9,6 +9,7 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "node --import ./tests/register.mjs --test \"tests/**/*.test.ts\"",
+    "eval": "node --import ./tests/register.mjs scripts/eval.ts",
     "import:met": "tsx scripts/importMetArtworks.ts",
     "build:paintings": "tsx scripts/buildPaintingLibrary.ts"
   },
