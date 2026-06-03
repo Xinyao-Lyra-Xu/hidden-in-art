@@ -8,6 +8,7 @@ import {
   concurrencyLimiter,
   turnTokenBudget,
   clientKey,
+  usingGlobalRateLimit,
 } from "@/infrastructure/ratelimit/guards";
 import { runChatTurn, AgentInputError } from "@/application/agentChat";
 
@@ -25,11 +26,12 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
 
   // Guardrail 1: per-client rate limit. Reject bursts before any work.
+  // Global (Redis) when configured, else in-process — both awaited here.
   const key = clientKey(request.headers);
-  const rl = rateLimiter.take(key);
+  const rl = await rateLimiter.take(key);
   if (!rl.allowed) {
     const retryAfterSec = Math.ceil(rl.retryAfterMs / 1000);
-    log.warn("rate limited", { key, retryAfterMs: rl.retryAfterMs });
+    log.warn("rate limited", { key, retryAfterMs: rl.retryAfterMs, scope: usingGlobalRateLimit ? "global" : "local" });
     return Response.json(
       { error: "Too many requests — please slow down a moment." },
       {
