@@ -3,6 +3,12 @@ import { resolveLlmConfig, MissingLlmKeyError } from "@/infrastructure/llm/confi
 import { createOpenAiCompatCaller } from "@/infrastructure/llm/openaiCompatCaller";
 import { withRetry } from "@/infrastructure/llm/retry";
 import { createLogger, newRequestId } from "@/infrastructure/observability/logger";
+import {
+  rateLimiter,
+  concurrencyLimiter,
+  turnTokenBudget,
+  clientKey,
+} from "@/infrastructure/ratelimit/guards";
 import { runChatTurn, AgentInputError } from "@/application/agentChat";
 
 // Conversational art-agent endpoint. The LLM API key lives only here on the
@@ -18,6 +24,44 @@ export async function POST(request: NextRequest) {
   const log = createLogger({ base: { requestId, route: "/api/agent" } });
   const startedAt = Date.now();
 
+  // Guardrail 1: per-client rate limit. Reject bursts before any work.
+  const key = clientKey(request.headers);
+  const rl = rateLimiter.take(key);
+  if (!rl.allowed) {
+    const retryAfterSec = Math.ceil(rl.retryAfterMs / 1000);
+    log.warn("rate limited", { key, retryAfterMs: rl.retryAfterMs });
+    return Response.json(
+      { error: "Too many requests — please slow down a moment." },
+      {
+        status: 429,
+        headers: { "x-request-id": requestId, "retry-after": String(retryAfterSec) },
+      },
+    );
+  }
+
+  // Guardrail 2: cap simultaneous in-flight turns (protects provider quota).
+  const release = concurrencyLimiter.acquire();
+  if (!release) {
+    log.warn("at concurrency cap", { inFlight: concurrencyLimiter.inFlight() });
+    return Response.json(
+      { error: "The studio assistant is busy — please try again shortly." },
+      { status: 503, headers: { "x-request-id": requestId, "retry-after": "2" } },
+    );
+  }
+
+  try {
+    return await handleTurn(request, requestId, log, startedAt);
+  } finally {
+    release();
+  }
+}
+
+async function handleTurn(
+  request: NextRequest,
+  requestId: string,
+  log: ReturnType<typeof createLogger>,
+  startedAt: number,
+): Promise<Response> {
   let body: {
     message?: unknown;
     settings?: unknown;
@@ -68,6 +112,7 @@ export async function POST(request: NextRequest) {
       library: body.library,
       history: body.history,
       callLlm,
+      maxTokens: turnTokenBudget(),
       onEvent: (event) => log.debug("agent event", { ...event }),
     });
     log.info("turn ok", {

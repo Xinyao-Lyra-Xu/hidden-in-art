@@ -56,3 +56,29 @@ test("emits a tool_call event for each tool the model invokes", async () => {
   assert.ok(toolEvents[0].type === "tool_call" && toolEvents[0].name === "set_target_painting");
   assert.equal(toolEvents[0].type === "tool_call" && toolEvents[0].ok, true);
 });
+
+test("stops at the token budget and emits budget_exceeded", async () => {
+  // A model that keeps calling tools forever, reporting tokens each time.
+  const caller: LlmCaller = async () => ({
+    stop_reason: "tool_use",
+    content: [{ type: "tool_use", id: "t", name: "adjust_abstraction", input: { direction: "more" } }],
+    usage: { promptTokens: 300, completionTokens: 200, totalTokens: 500 },
+  });
+
+  const events: AgentEvent[] = [];
+  const result = await runAgentTurn({
+    userMessage: "more more more",
+    settings: { ...DEFAULT_SETTINGS },
+    library: FIXTURE_LIBRARY,
+    callLlm: caller,
+    maxSteps: 20,
+    maxTokens: 1200, // ~3 calls of 500 -> stops at step 3, not 20
+    onEvent: (e) => events.push(e),
+  });
+
+  assert.ok(events.some((e) => e.type === "budget_exceeded"));
+  assert.ok(!events.some((e) => e.type === "max_steps")); // budget tripped first
+  const llmCalls = events.filter((e) => e.type === "llm_call_start").length;
+  assert.ok(llmCalls < 20 && llmCalls >= 3);
+  assert.match(result.reply, /limit/i);
+});

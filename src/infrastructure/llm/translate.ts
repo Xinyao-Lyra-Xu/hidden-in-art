@@ -38,6 +38,8 @@ export type OpenAiRequestBody = {
   messages: OpenAiMessage[];
   tools?: OpenAiTool[];
   tool_choice?: "auto";
+  max_tokens?: number;
+  temperature?: number;
 };
 
 export type OpenAiResponseBody = {

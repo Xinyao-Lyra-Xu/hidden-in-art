@@ -69,8 +69,9 @@ export type AgentEvent =
   | { type: "llm_call_start"; step: number }
   | { type: "llm_call_end"; step: number; stopReason: string; ms: number; usage?: TokenUsage }
   | { type: "tool_call"; step: number; name: string; ok: boolean; ms: number }
-  | { type: "turn_end"; steps: number; toolCalls: number; replyChars: number }
-  | { type: "max_steps"; steps: number };
+  | { type: "turn_end"; steps: number; toolCalls: number; replyChars: number; totalTokens: number }
+  | { type: "max_steps"; steps: number }
+  | { type: "budget_exceeded"; totalTokens: number; budget: number };
 
 const DEFAULT_MAX_STEPS = 8;
 
@@ -122,9 +123,13 @@ export async function runAgentTurn(args: {
   // Prior conversation turns (text-only, no tool scaffolding) to give the model
   // memory across messages. Validated/capped upstream in the application layer.
   history?: Message[];
+  // Stop the tool loop once cumulative token usage reaches this budget, so a
+  // misbehaving model can't run up an unbounded bill. undefined = no budget.
+  maxTokens?: number;
 }): Promise<AgentTurnResult> {
   const { userMessage, callLlm, library } = args;
   const maxSteps = args.maxSteps ?? DEFAULT_MAX_STEPS;
+  const maxTokens = args.maxTokens;
   const emit = args.onEvent ?? (() => {});
 
   let settings: AgentSettings = { ...args.settings };
@@ -133,6 +138,7 @@ export async function runAgentTurn(args: {
     { role: "user", content: userMessage },
   ];
   const toolCalls: ToolCallRecord[] = [];
+  let totalTokens = 0;
 
   for (let step = 0; step < maxSteps; step++) {
     emit({ type: "llm_call_start", step });
@@ -142,6 +148,7 @@ export async function runAgentTurn(args: {
       messages,
       tools: ART_AGENT_TOOLS,
     });
+    totalTokens += response.usage?.totalTokens ?? 0;
     emit({
       type: "llm_call_end",
       step,
@@ -154,7 +161,13 @@ export async function runAgentTurn(args: {
 
     if (response.stop_reason !== "tool_use") {
       const reply = textOf(response.content);
-      emit({ type: "turn_end", steps: step + 1, toolCalls: toolCalls.length, replyChars: reply.length });
+      emit({
+        type: "turn_end",
+        steps: step + 1,
+        toolCalls: toolCalls.length,
+        replyChars: reply.length,
+        totalTokens,
+      });
       return { reply, settings, toolCalls, messages };
     }
 
@@ -189,6 +202,21 @@ export async function runAgentTurn(args: {
     }
 
     messages.push({ role: "user", content: results });
+
+    // Stop early if we've spent the token budget rather than starting another
+    // (paid) round-trip. The applied settings still come back to the user.
+    if (maxTokens !== undefined && totalTokens >= maxTokens) {
+      emit({ type: "budget_exceeded", totalTokens, budget: maxTokens });
+      const reply = "I've applied what I could within this turn's limit — tell me what to refine.";
+      emit({
+        type: "turn_end",
+        steps: step + 1,
+        toolCalls: toolCalls.length,
+        replyChars: reply.length,
+        totalTokens,
+      });
+      return { reply, settings, toolCalls, messages };
+    }
   }
 
   // Ran out of steps without a plain-text answer — return a graceful fallback so
@@ -196,7 +224,13 @@ export async function runAgentTurn(args: {
   emit({ type: "max_steps", steps: maxSteps });
   const reply =
     "I've made several adjustments — take a look and tell me what to tweak next.";
-  emit({ type: "turn_end", steps: maxSteps, toolCalls: toolCalls.length, replyChars: reply.length });
+  emit({
+    type: "turn_end",
+    steps: maxSteps,
+    toolCalls: toolCalls.length,
+    replyChars: reply.length,
+    totalTokens,
+  });
   return {
     reply,
     settings,

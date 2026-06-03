@@ -32,6 +32,10 @@ export type ResolvedLlmConfig = {
   baseUrl: string;
   model: string;
   apiKey: string;
+  /** Output token cap per call (cost guardrail). undefined = provider default. */
+  maxOutputTokens?: number;
+  /** Sampling temperature. undefined = provider default. */
+  temperature?: number;
 };
 
 export class MissingLlmKeyError extends Error {
@@ -61,5 +65,19 @@ export function resolveLlmConfig(
     baseUrl: env.LLM_BASE_URL || preset.baseUrl,
     model: env.LLM_MODEL || preset.model,
     apiKey,
+    maxOutputTokens: parsePositiveInt(env.LLM_MAX_OUTPUT_TOKENS),
+    temperature: parseTemperature(env.LLM_TEMPERATURE),
   };
+}
+
+function parsePositiveInt(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+function parseTemperature(value: string | undefined): number | undefined {
+  if (value === undefined || value.trim() === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= 2 ? n : undefined;
 }

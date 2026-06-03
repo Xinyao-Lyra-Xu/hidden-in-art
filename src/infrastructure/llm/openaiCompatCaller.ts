@@ -35,6 +35,10 @@ export type OpenAiCompatConfig = {
   model: string;
   fetchImpl?: FetchLike;
   timeoutMs?: number;
+  /** Cap output tokens per call to bound cost. Omitted = provider default. */
+  maxOutputTokens?: number;
+  /** Sampling temperature. Omitted = provider default. */
+  temperature?: number;
 };
 
 function endpoint(baseUrl: string): string {
@@ -51,6 +55,8 @@ export function createOpenAiCompatCaller(config: OpenAiCompatConfig): LlmCaller 
       messages: toOpenAiMessages(system, messages),
       tools: toOpenAiTools(tools),
       tool_choice: "auto",
+      ...(config.maxOutputTokens !== undefined ? { max_tokens: config.maxOutputTokens } : {}),
+      ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
     };
 
     const controller = new AbortController();

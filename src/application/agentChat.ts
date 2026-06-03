@@ -49,6 +49,7 @@ export type ChatTurnInput = {
   library: unknown;
   callLlm: LlmCaller;
   maxSteps?: number;
+  maxTokens?: number;
   onEvent?: (event: AgentEvent) => void;
   // Prior conversation turns from the client. Untrusted: sanitized below.
   history?: unknown;
@@ -113,6 +114,7 @@ export async function runChatTurn(input: ChatTurnInput): Promise<AgentTurnResult
     library,
     callLlm: input.callLlm,
     maxSteps: input.maxSteps,
+    maxTokens: input.maxTokens,
     onEvent: input.onEvent,
     history: sanitizeHistory(input.history),
   });
