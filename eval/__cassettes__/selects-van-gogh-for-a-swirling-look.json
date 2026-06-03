@@ -1,0 +1,56 @@
+{
+  "caseName": "selects Van Gogh for a swirling look",
+  "model": "gemini-2.5-flash-lite",
+  "recordedAt": "2026-06-03T16:21:35.708Z",
+  "responses": [
+    {
+      "stop_reason": "tool_use",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "function-call-4705355707172922224",
+          "name": "set_target_painting",
+          "input": {
+            "query": "swirling Van Gogh painting"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "function-call-4705355707172922397",
+          "name": "set_color_matching",
+          "input": {
+            "algorithm": "jitter",
+            "abstraction": 0.5
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "function-call-4705355707172922570",
+          "name": "adjust_abstraction",
+          "input": {
+            "value": 0.5
+          }
+        }
+      ],
+      "usage": {
+        "promptTokens": 814,
+        "completionTokens": 62,
+        "totalTokens": 876
+      }
+    },
+    {
+      "stop_reason": "end_turn",
+      "content": [
+        {
+          "type": "text",
+          "text": "I've updated your photo to resemble Van Gogh's \"The Starry Night,\" using a loose color-matching algorithm and a medium level of abstraction to capture that swirling, expressive style."
+        }
+      ],
+      "usage": {
+        "promptTokens": 951,
+        "completionTokens": 39,
+        "totalTokens": 990
+      }
+    }
+  ]
+}

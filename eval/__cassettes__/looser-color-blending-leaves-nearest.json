@@ -1,0 +1,49 @@
+{
+  "caseName": "looser color blending leaves nearest",
+  "model": "gemini-2.5-flash-lite",
+  "recordedAt": "2026-06-03T16:22:27.456Z",
+  "responses": [
+    {
+      "stop_reason": "tool_use",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "function-call-1305570422817348177",
+          "name": "set_color_matching",
+          "input": {
+            "abstraction": 0.5,
+            "algorithm": "jitter"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "function-call-1305570422817346592",
+          "name": "adjust_abstraction",
+          "input": {
+            "direction": "more",
+            "amount": "moderate"
+          }
+        }
+      ],
+      "usage": {
+        "promptTokens": 813,
+        "completionTokens": 44,
+        "totalTokens": 857
+      }
+    },
+    {
+      "stop_reason": "end_turn",
+      "content": [
+        {
+          "type": "text",
+          "text": ""
+        }
+      ],
+      "usage": {
+        "promptTokens": 898,
+        "completionTokens": 0,
+        "totalTokens": 898
+      }
+    }
+  ]
+}

@@ -1,18 +1,17 @@
-// Online behavioral eval for the art agent.
+// Behavioral eval for the art agent — two modes.
 //
-// Runs each scenario in eval/cases.ts against the REAL configured model and
-// checks structural outcomes. This hits the provider API (costs quota), so it
-// is a manual gate, not part of CI:
+//   npm run eval                  # REPLAY (default): offline, no key, CI-safe.
+//                                  # Returns recorded model responses from
+//                                  # eval/__cassettes__/ and checks agent code.
+//   npm run eval -- --record      # RECORD: hits the REAL model, refreshes the
+//                                  # cassettes. Needs LLM_API_KEY. Re-record
+//                                  # whenever you change the prompt/tools.
+//   npm run eval -- --runs 3      # replay 3x (flakiness read; deterministic)
+//   npm run eval -- --record --interval 8000   # pace recording under free-tier RPM
 //
-//   npm run eval            # one pass
-//   npm run eval -- --runs 3  # repeat for a flakiness read
-//
-// Determinism is helped by temperature 0 + structural (not prose) assertions.
-// Requires LLM_API_KEY (loaded from .env.local if present).
-//
-// Free tiers cap requests-per-minute (Gemini ~10 RPM). Each case's tool loop
-// makes several calls, so calls are throttled to a minimum interval by default
-// (--interval <ms>, 0 to disable) to stay under the limit.
+// Checks assert STRUCTURAL outcomes (which tool ran, resulting settings, chosen
+// painting), never the model's prose. Replay catches code regressions; re-record
+// to re-baseline model behavior.
 
 import { runChatTurn } from "@/application/agentChat";
 import { resolveLlmConfig, MissingLlmKeyError } from "@/infrastructure/llm/config";
@@ -22,6 +21,11 @@ import { LlmHttpError, LlmTimeoutError } from "@/infrastructure/llm/errors";
 import type { LlmCaller } from "@/domain/agent/runner";
 import { EVAL_CASES } from "../eval/cases";
 import { EVAL_LIBRARY } from "../eval/library";
+import {
+  createReplayCaller,
+  createRecordingCaller,
+  hasCassette,
+} from "../eval/cassette";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -52,53 +56,79 @@ try {
   /* no .env.local — rely on real env */
 }
 
-function parseRuns(argv: string[]): number {
-  const i = argv.indexOf("--runs");
+function parseIntFlag(argv: string[], flag: string, fallback: number, min = 1): number {
+  const i = argv.indexOf(flag);
   if (i >= 0 && argv[i + 1]) {
     const n = Number(argv[i + 1]);
-    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+    if (Number.isFinite(n) && n >= min) return Math.floor(n);
   }
-  return 1;
+  return fallback;
 }
 
-function parseInterval(argv: string[]): number {
-  const i = argv.indexOf("--interval");
-  if (i >= 0 && argv[i + 1]) {
-    const n = Number(argv[i + 1]);
-    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
-  }
-  return 6500; // ~9 calls/min, under Gemini free-tier 10 RPM
-}
+type CaseCallerFactory = (caseName: string) => { caller: LlmCaller; flush: () => void };
 
 // Resolve to an exit code instead of calling process.exit() mid-loop: an abrupt
 // exit while undici keep-alive sockets are still open trips a libuv assertion on
 // Windows. Setting process.exitCode and returning lets the loop drain cleanly.
 async function main(): Promise<number> {
-  const runs = parseRuns(process.argv.slice(2));
-  const intervalMs = parseInterval(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const record = argv.includes("--record");
+  const force = argv.includes("--force");
+  const runs = record ? 1 : parseIntFlag(argv, "--runs", 1);
+  const intervalMs = parseIntFlag(argv, "--interval", 6500, 0);
 
-  let config;
-  try {
-    config = resolveLlmConfig();
-  } catch (err) {
-    if (err instanceof MissingLlmKeyError) {
-      console.error("✗ " + err.message);
+  let modelLabel = "cassette";
+  let makeCaller: CaseCallerFactory;
+
+  if (record) {
+    // RECORD: real model, throttled + patient retry, capture to cassettes.
+    let config;
+    try {
+      config = resolveLlmConfig();
+    } catch (err) {
+      if (err instanceof MissingLlmKeyError) {
+        console.error("✗ " + err.message);
+        return 2;
+      }
+      throw err;
+    }
+    modelLabel = config.model;
+    const real = throttleCaller(
+      withRetry(
+        createOpenAiCompatCaller({
+          ...config,
+          temperature: 0,
+          maxOutputTokens: config.maxOutputTokens ?? 512,
+        }),
+        { maxAttempts: 5, baseDelayMs: 2000, maxDelayMs: 30_000 },
+      ),
+      intervalMs,
+    );
+    // Resumable: skip cases already recorded (verify via replay) so a run
+    // interrupted by a rate-limit window can be re-run to finish the rest.
+    // --force re-records everything.
+    makeCaller = (caseName) => {
+      if (!force && hasCassette(caseName)) {
+        return { caller: createReplayCaller(caseName), flush: () => {} };
+      }
+      return createRecordingCaller(real, caseName, config!.model);
+    };
+  } else {
+    // REPLAY: offline. Fail fast if any cassette is missing.
+    const missing = EVAL_CASES.filter((c) => !hasCassette(c.name)).map((c) => c.name);
+    if (missing.length > 0) {
+      console.error(
+        `✗ Missing cassettes for: ${missing.join(", ")}\n` +
+          "  Record them once with: npm run eval -- --record\n",
+      );
       return 2;
     }
-    throw err;
+    makeCaller = (caseName) => ({ caller: createReplayCaller(caseName), flush: () => {} });
   }
 
-  // temperature 0 for repeatability; modest output cap to keep cost down.
-  // Retry is patient (free-tier 429s want a long wait); throttle spaces calls.
-  const caller = throttleCaller(
-    withRetry(
-      createOpenAiCompatCaller({ ...config, temperature: 0, maxOutputTokens: config.maxOutputTokens ?? 512 }),
-      { maxAttempts: 5, baseDelayMs: 2000, maxDelayMs: 30_000 },
-    ),
-    intervalMs,
+  console.log(
+    `\nArt-agent eval · mode=${record ? "record" : "replay"} · model=${modelLabel} · runs=${runs}\n`,
   );
-
-  console.log(`\nArt-agent eval · model=${config.model} · runs=${runs} · interval=${intervalMs}ms\n`);
 
   let checksTotal = 0;
   let checksPassed = 0;
@@ -109,6 +139,7 @@ async function main(): Promise<number> {
     const labelTallies = new Map<string, number>();
 
     for (let run = 0; run < runs; run++) {
+      const { caller, flush } = makeCaller(c.name);
       let result;
       try {
         result = await runChatTurn({
@@ -119,8 +150,6 @@ async function main(): Promise<number> {
           callLlm: caller,
         });
       } catch (err) {
-        // Auth/quota/timeout: the model never ran, so abort the whole eval with
-        // a distinct code instead of reporting bogus behavioral failures.
         if (isInfraError(err)) {
           throw new ProviderError(err instanceof Error ? err.message : String(err));
         }
@@ -128,6 +157,7 @@ async function main(): Promise<number> {
         casePassedAllRuns = false;
         continue;
       }
+      if (record) flush(); // persist the tape only after a successful turn
       for (const chk of c.checks) {
         const ok = chk.pass(result);
         labelTallies.set(chk.label, (labelTallies.get(chk.label) ?? 0) + (ok ? 1 : 0));
@@ -147,7 +177,9 @@ async function main(): Promise<number> {
   }
 
   console.log(
-    `\n${checksPassed}/${checksTotal} checks passed · ${EVAL_CASES.length - casesFailed}/${EVAL_CASES.length} cases green\n`,
+    `\n${checksPassed}/${checksTotal} checks passed · ${EVAL_CASES.length - casesFailed}/${EVAL_CASES.length} cases green` +
+      (record ? " · cassettes refreshed" : "") +
+      "\n",
   );
   return casesFailed > 0 ? 1 : 0;
 }
@@ -161,7 +193,7 @@ main()
       console.error(`\n✗ Provider error — eval could not run:\n  ${err.message.slice(0, 300)}\n`);
       console.error(
         "This is an LLM connectivity/config issue (auth, disabled API, or quota),\n" +
-          "not an agent behavior failure. Fix the key/project, then re-run `npm run eval`.\n",
+          "not an agent behavior failure. Fix the key/project, then re-run with --record.\n",
       );
       process.exitCode = 2;
       return;

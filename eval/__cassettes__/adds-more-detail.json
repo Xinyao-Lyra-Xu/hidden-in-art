@@ -1,0 +1,40 @@
+{
+  "caseName": "adds more detail",
+  "model": "gemini-2.5-flash-lite",
+  "recordedAt": "2026-06-03T16:22:14.934Z",
+  "responses": [
+    {
+      "stop_reason": "tool_use",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "function-call-7536560306451249713",
+          "name": "set_patch_density",
+          "input": {
+            "amount": "large",
+            "direction": "more"
+          }
+        }
+      ],
+      "usage": {
+        "promptTokens": 809,
+        "completionTokens": 22,
+        "totalTokens": 831
+      }
+    },
+    {
+      "stop_reason": "end_turn",
+      "content": [
+        {
+          "type": "text",
+          "text": "I've increased the patch density to the maximum, which will add a lot more fine detail."
+        }
+      ],
+      "usage": {
+        "promptTokens": 856,
+        "completionTokens": 20,
+        "totalTokens": 876
+      }
+    }
+  ]
+}

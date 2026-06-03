@@ -36,6 +36,11 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Eval (offline replay)
+        # Replays recorded cassettes — deterministic, no API key, no network.
+        # Re-record locally with `npm run eval -- --record` after prompt changes.
+        run: npm run eval
+
       - name: Build
         run: npm run build
         env:

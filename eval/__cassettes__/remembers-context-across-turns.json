@@ -1,0 +1,40 @@
+{
+  "caseName": "remembers context across turns",
+  "model": "gemini-2.5-flash-lite",
+  "recordedAt": "2026-06-03T16:22:40.645Z",
+  "responses": [
+    {
+      "stop_reason": "tool_use",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "function-call-2765994781065357934",
+          "name": "adjust_abstraction",
+          "input": {
+            "direction": "more",
+            "amount": "slight"
+          }
+        }
+      ],
+      "usage": {
+        "promptTokens": 828,
+        "completionTokens": 21,
+        "totalTokens": 849
+      }
+    },
+    {
+      "stop_reason": "end_turn",
+      "content": [
+        {
+          "type": "text",
+          "text": "I've increased the abstraction level slightly."
+        }
+      ],
+      "usage": {
+        "promptTokens": 872,
+        "completionTokens": 9,
+        "totalTokens": 881
+      }
+    }
+  ]
+}
