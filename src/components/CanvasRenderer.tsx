@@ -1,9 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Columns2, Download, Image as ImageIcon, RotateCcw } from "lucide-react";
+import { Columns2, Download, Image as ImageIcon, Paintbrush, RotateCcw } from "lucide-react";
 import type { ArtworkMetadata } from "@/domain/artwork/types";
 import { getArtworkImageUrl } from "@/lib/artworkUrl";
+import {
+  type FocalBox, type Corner,
+  clamp01, regionLabel, pickCorner, insideFocal, moveFocal, resizeFocal,
+} from "@/lib/focalBox";
+import { type PatchShape, fastRand, patchPath } from "@/lib/patchShape";
+import { type GridMatch, findClosestMatch, patchesInRadius } from "@/lib/gridMatch";
 
 // ── Layout constants ──────────────────────────────────────────────────────────
 const CANVAS_W    = 900;
@@ -31,15 +37,7 @@ const ZOOM      = 5;
 // ── Types ─────────────────────────────────────────────────────────────────────
 type PaintData = { pixels: Uint8ClampedArray; w: number; h: number };
 
-type FocalBox = { nx0: number; ny0: number; nx1: number; ny1: number };
-
 type ColorCandidate = { nx: number; ny: number; r: number; g: number; b: number };
-
-type GridMatch = {
-  focalNx: number; focalNy: number;
-  userNx:  number; userNy:  number;
-  r: number; g: number; b: number;
-};
 
 type ReconLayout = { reconX: number; reconY: number; reconW: number; reconH: number };
 
@@ -54,14 +52,6 @@ type PhasesData = {
 type ClickedMatchInfo = { match: GridMatch; cssX: number; cssY: number };
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
-
-function fastRand(a: number, b: number): number {
-  let x = ((a * 12347 + b * 17911) ^ (a << 5)) >>> 0;
-  x ^= x >>> 16;
-  x = (x * 0x45d9f3b) >>> 0;
-  x ^= x >>> 16;
-  return x / 0xffffffff;
-}
 
 function makeOffscreen(img: HTMLImageElement, maxPx: number): HTMLCanvasElement {
   const s = Math.min(maxPx / img.width, maxPx / img.height, 1);
@@ -98,17 +88,6 @@ function avgRgb(
       r += px[i]; g += px[i + 1]; b += px[i + 2]; n++;
     }
   return n > 0 ? [r / n, g / n, b / n] : [128, 128, 128];
-}
-
-function findClosestMatch(matches: GridMatch[], fnx: number, fny: number): GridMatch | null {
-  if (matches.length === 0) return null;
-  let best = matches[0];
-  let bestD = (best.focalNx - fnx) ** 2 + (best.focalNy - fny) ** 2;
-  for (const m of matches) {
-    const d = (m.focalNx - fnx) ** 2 + (m.focalNy - fny) ** 2;
-    if (d < bestD) { bestD = d; best = m; }
-  }
-  return best;
 }
 
 // ── Saliency detection ────────────────────────────────────────────────────────
@@ -251,6 +230,7 @@ function makePhase2(
   cols: number, rows: number,
   rW: number, rH: number,
   patchR: number,
+  shape: PatchShape,
 ): HTMLCanvasElement {
   const focalW = focal.nx1 - focal.nx0;
   const focalH = focal.ny1 - focal.ny0;
@@ -263,6 +243,7 @@ function makePhase2(
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, rW, rH);
 
+  let idx = 0;
   for (let gy = 0; gy < rows; gy++) {
     for (let gx = 0; gx < cols; gx++) {
       const fnx = (gx + 0.5) / cols;
@@ -272,8 +253,7 @@ function makePhase2(
       const px0 = pnx * pd.w - cellW / 2;
       const py0 = pny * pd.h - cellH / 2;
       const [r, g, b] = avgRgb(pd.pixels, pd.w, pd.h, px0, py0, px0 + cellW, py0 + cellH);
-      ctx.beginPath();
-      ctx.arc(fnx * rW, fny * rH, patchR, 0, Math.PI * 2);
+      patchPath(ctx, fnx * rW, fny * rH, patchR, shape, idx++);
       ctx.fillStyle = `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`;
       ctx.fill();
     }
@@ -286,6 +266,7 @@ function makePhase3(
   userCanvas: HTMLCanvasElement,
   rW: number, rH: number,
   patchR: number,
+  shape: PatchShape,
 ): HTMLCanvasElement {
   const c = document.createElement("canvas");
   c.width = rW; c.height = rH;
@@ -293,12 +274,12 @@ function makePhase3(
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, rW, rH);
 
-  for (const m of matches) {
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
     const cx = m.focalNx * rW;
     const cy = m.focalNy * rH;
     ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, patchR, 0, Math.PI * 2);
+    patchPath(ctx, cx, cy, patchR, shape, i);
     ctx.clip();
     const srcR = Math.max(1.5, patchR);
     ctx.drawImage(
@@ -316,43 +297,102 @@ function makePhase3(
 
 // ── Painting locator ──────────────────────────────────────────────────────────
 
-function regionLabel(f: FocalBox): string {
-  const cx = (f.nx0 + f.nx1) / 2;
-  const cy = (f.ny0 + f.ny1) / 2;
-  const h  = cx < 0.33 ? "left"  : cx > 0.67 ? "right"  : "";
-  const v  = cy < 0.33 ? "top"   : cy > 0.67 ? "bottom" : "";
-  if (v && h) return `${v}-${h}`;
-  return v || h || "center";
-}
+type FocalDrag = { mode: "move" | Corner; startNx: number; startNy: number; startBox: FocalBox };
 
 function PaintingLocator({
   focal,
   artwork,
   hoverNorm,
+  editable = false,
+  isCustom = false,
+  onFocalChange,
+  onReset,
 }: {
   focal:     FocalBox;
   artwork:   ArtworkMetadata;
   hoverNorm: { nx: number; ny: number } | null;
+  editable?: boolean;
+  isCustom?: boolean;
+  onFocalChange?: (f: FocalBox) => void;
+  onReset?: () => void;
 }) {
   const src = getArtworkImageUrl(artwork);
+  const [box, setBox] = useState<FocalBox>(focal);
+  const dragRef = useRef<FocalDrag | null>(null);
+
+  // Keep the local box in sync with the committed focal unless mid-drag.
+  useEffect(() => {
+    if (!dragRef.current) setBox(focal);
+  }, [focal]);
+
+  // `box` mirrors `focal` when idle (kept in sync by the effect above) and holds
+  // the live geometry while dragging, so it is always the right thing to render.
+  const shown = box;
 
   const hx = hoverNorm !== null
-    ? focal.nx0 + hoverNorm.nx * (focal.nx1 - focal.nx0)
+    ? shown.nx0 + hoverNorm.nx * (shown.nx1 - shown.nx0)
     : null;
   const hy = hoverNorm !== null
-    ? focal.ny0 + hoverNorm.ny * (focal.ny1 - focal.ny0)
+    ? shown.ny0 + hoverNorm.ny * (shown.ny1 - shown.ny0)
     : null;
+
+  function pointerNorm(e: React.PointerEvent<HTMLDivElement>): [number, number] {
+    const r = e.currentTarget.getBoundingClientRect();
+    return [clamp01((e.clientX - r.left) / r.width, 0, 1), clamp01((e.clientY - r.top) / r.height, 0, 1)];
+  }
+
+  function handleDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (!editable) return;
+    const [nx, ny] = pointerNorm(e);
+    const corner = pickCorner(nx, ny, focal);
+    if (!corner && !insideFocal(nx, ny, focal)) return;
+    dragRef.current = { mode: corner ?? "move", startNx: nx, startNy: ny, startBox: focal };
+    setBox(focal);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function handleMove(e: React.PointerEvent<HTMLDivElement>) {
+    const d = dragRef.current;
+    if (!d) return;
+    const [nx, ny] = pointerNorm(e);
+    const s = d.startBox;
+    if (d.mode === "move") {
+      setBox(moveFocal(s, nx - d.startNx, ny - d.startNy));
+    } else {
+      setBox(resizeFocal(s, d.mode, nx, ny));
+    }
+  }
+
+  function handleUp(e: React.PointerEvent<HTMLDivElement>) {
+    const d = dragRef.current;
+    if (!d) return;
+    dragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+    onFocalChange?.(box);
+  }
+
+  const handleR = 0.022;
+  const corners: [number, number][] = [
+    [shown.nx0, shown.ny0], [shown.nx1, shown.ny0],
+    [shown.nx0, shown.ny1], [shown.nx1, shown.ny1],
+  ];
 
   return (
     <div className="flex flex-col items-center gap-2">
       <div
         className="relative inline-block w-[140px] overflow-hidden rounded border border-neutral-200 shadow-sm sm:w-[176px]"
+        style={editable ? { touchAction: "none", cursor: "move" } : undefined}
+        onPointerDown={handleDown}
+        onPointerMove={handleMove}
+        onPointerUp={handleUp}
+        onPointerCancel={handleUp}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={src}
           alt={artwork.title}
           width={176}
+          draggable={false}
           style={{ display: "block", width: "100%", height: "auto" }}
         />
         <svg
@@ -361,14 +401,18 @@ function PaintingLocator({
           preserveAspectRatio="none"
         >
           <rect
-            x={focal.nx0}
-            y={focal.ny0}
-            width={focal.nx1 - focal.nx0}
-            height={focal.ny1 - focal.ny0}
+            x={shown.nx0}
+            y={shown.ny0}
+            width={shown.nx1 - shown.nx0}
+            height={shown.ny1 - shown.ny0}
             fill="rgba(220,38,38,0.12)"
             stroke="rgba(220,38,38,0.85)"
             strokeWidth={0.007}
           />
+          {editable && corners.map(([cx, cy], i) => (
+            <circle key={i} cx={cx} cy={cy} r={handleR}
+              fill="rgba(255,255,255,0.95)" stroke="rgba(220,38,38,0.95)" strokeWidth={0.006} />
+          ))}
           {hx !== null && hy !== null && (
             <circle cx={hx} cy={hy} r={0.018} fill="rgba(220,38,38,0.85)" />
           )}
@@ -376,10 +420,23 @@ function PaintingLocator({
       </div>
       <p className="museum-caption max-w-[200px] text-center text-[11px] text-neutral-500">
         Reconstructing:{" "}
-        <span className="font-semibold text-neutral-700">{regionLabel(focal)}</span>{" "}
+        <span className="font-semibold text-neutral-700">{regionLabel(shown)}</span>{" "}
         region of <em>&ldquo;{artwork.title}&rdquo;</em>
         {artwork.artist ? ` by ${artwork.artist}` : ""}
       </p>
+      {editable && (
+        <p className="museum-caption text-center text-[10px] text-neutral-400">
+          Drag the box to move · drag a corner to resize
+          {isCustom && onReset && (
+            <>
+              {" · "}
+              <button type="button" onClick={onReset} className="underline hover:text-neutral-600">
+                reset to auto
+              </button>
+            </>
+          )}
+        </p>
+      )}
     </div>
   );
 }
@@ -434,7 +491,6 @@ function fitCenteredText(
 
 // ── Hover magnifier ───────────────────────────────────────────────────────────
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function HoverMagnifier({
   match,
   userCanvas,
@@ -574,11 +630,17 @@ type Props = {
 
 export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Props) {
   const canvasRef    = useRef<HTMLCanvasElement>(null);
+  const overlayRef   = useRef<HTMLCanvasElement>(null);
   const userCacheRef = useRef<{ src: HTMLImageElement; canvas: HTMLCanvasElement } | null>(null);
   const rafRef       = useRef<number>(0);
   const layoutRef    = useRef<ReconLayout | null>(null);
   const startAnimRef = useRef<() => void>(() => {});
   const drawCompareRef = useRef<(norm: number) => void>(() => {});
+  const drawTraceRef = useRef<(m: GridMatch | null) => void>(() => {});
+  const toScreenRef  = useRef<(nx: number, ny: number) => [number, number]>(() => [0, 0]);
+  const revealAtRef  = useRef<(mx: number, my: number) => void>(() => {});
+  const startBrushRef = useRef<() => void>(() => {});
+  const brushModeRef = useRef(false);
   const phasesRef    = useRef<PhasesData | null>(null);
   const sliderNormRef  = useRef(0.5);
   const isDraggingRef  = useRef(false);
@@ -591,12 +653,16 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
 
   const [pd,           setPd]          = useState<PaintData | null>(null);
   const [focal,        setFocal]       = useState<FocalBox | null>(null);
+  const [focalOverride, setFocalOverride] = useState<FocalBox | null>(null);
   const [hoverNorm,    setHoverNorm]   = useState<{ nx: number; ny: number } | null>(null);
   const [clickedMatch, setClickedMatch] = useState<ClickedMatchInfo | null>(null);
   const [compareMode,  setCompareMode] = useState(false);
+  const [brushMode,    setBrushMode]   = useState(false);
   const [statusLine,   setStatusLine]  = useState("Choose a painting to begin");
   const [isLoading,    setIsLoading]   = useState(false);
   const [isMobile,     setIsMobile]    = useState(false);
+  const [patchShape,   setPatchShape]  = useState<PatchShape>("circle");
+  const [hoverTrace,   setHoverTrace]  = useState<{ match: GridMatch; lensCssX: number; lensCssY: number } | null>(null);
   // Mirrors phasesRef so PatchPopup can read userCanvas during render without ref access.
   const [renderPhases, setRenderPhases] = useState<PhasesData | null>(null);
 
@@ -662,6 +728,13 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     compareModeRef.current = false;
     setClickedMatch(null);
     setHoverNorm(null);
+    setHoverTrace(null);
+    setBrushMode(false);
+    brushModeRef.current = false;
+    drawTraceRef.current = () => {};
+    toScreenRef.current = () => [0, 0];
+    revealAtRef.current = () => {};
+    startBrushRef.current = () => {};
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -756,7 +829,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const userCanvas = userCacheRef.current.canvas;
 
     // ── Compute focal region + grid matches ──────────────────────────────────
-    const computedFocal = detectSalientRegion(pd.pixels, pd.w, pd.h);
+    const computedFocal = focalOverride ?? detectSalientRegion(pd.pixels, pd.w, pd.h);
     setFocal(computedFocal);
 
     const focalW = computedFocal.nx1 - computedFocal.nx0;
@@ -800,6 +873,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     ];
     const inUserArea = (ux: number, uy: number) =>
       ux >= uDrawX && ux <= uDrawX + uDrawW && uy >= uDrawY && uy <= uDrawY + uDrawH;
+    toScreenRef.current = toScreen;
 
     const pts = matches.map((m) => {
       const [ux, uy] = toScreen(m.userNx, m.userNy);
@@ -810,8 +884,8 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const threadPts  = validPts.filter((_, i) => i % threadStep === 0).slice(0, MAX_THREADS);
 
     const p1 = makePhase1(pd, computedFocal, reconW, reconH);
-    const p2 = makePhase2(pd, computedFocal, cols, rows, reconW, reconH, patchR);
-    const p3 = makePhase3(matches, userCanvas, reconW, reconH, patchR);
+    const p2 = makePhase2(pd, computedFocal, cols, rows, reconW, reconH, patchR, patchShape);
+    const p3 = makePhase3(matches, userCanvas, reconW, reconH, patchR, patchShape);
 
     // Store phases for overlay features; mirror to state so render can read without ref access.
     const newPhases = { p1, p3, matches, userCanvas, patchR };
@@ -910,6 +984,100 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
     ctx.drawImage(p1, reconX, reconY, reconW, reconH);
 
+    // ── Hover-trace overlay (live thread from a patch to its source pixel) ──────
+    const overlay = overlayRef.current;
+    const octx = overlay?.getContext("2d") ?? null;
+    if (overlay && octx) {
+      overlay.width  = cw      * dpr;
+      overlay.height = canvasH * dpr;
+      if (isMobileView) {
+        overlay.style.width       = "100%";
+        overlay.style.height      = "";
+        overlay.style.aspectRatio = `${cw} / ${canvasH}`;
+      } else {
+        overlay.style.width       = `${cw}px`;
+        overlay.style.height      = `${canvasH}px`;
+        overlay.style.aspectRatio = "";
+      }
+      octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    drawTraceRef.current = (m: GridMatch | null) => {
+      if (!octx) return;
+      octx.clearRect(0, 0, cw, canvasH);
+      if (!m) return;
+      const px = reconX + m.focalNx * reconW;
+      const py = reconY + m.focalNy * reconH;
+      const [sx, sy] = toScreen(m.userNx, m.userNy);
+
+      octx.save();
+      // connecting thread
+      octx.strokeStyle = "rgba(220,38,38,0.55)";
+      octx.lineWidth = 1.25;
+      octx.setLineDash([4, 3]);
+      octx.beginPath();
+      octx.moveTo(px, py);
+      octx.lineTo(sx, sy);
+      octx.stroke();
+      octx.setLineDash([]);
+
+      // highlight ring around the hovered patch
+      octx.strokeStyle = "rgba(255,255,255,0.95)";
+      octx.lineWidth = 2;
+      octx.beginPath();
+      octx.arc(px, py, Math.max(4, patchR + 2), 0, Math.PI * 2);
+      octx.stroke();
+      octx.strokeStyle = "rgba(220,38,38,0.9)";
+      octx.lineWidth = 1;
+      octx.beginPath();
+      octx.arc(px, py, Math.max(4, patchR + 2), 0, Math.PI * 2);
+      octx.stroke();
+
+      // marker on the source pixel inside the photo
+      octx.fillStyle = "rgba(220,38,38,0.9)";
+      octx.beginPath();
+      octx.arc(sx, sy, 3.5, 0, Math.PI * 2);
+      octx.fill();
+      octx.strokeStyle = "rgba(255,255,255,0.95)";
+      octx.lineWidth = 1.5;
+      octx.beginPath();
+      octx.arc(sx, sy, 6, 0, Math.PI * 2);
+      octx.stroke();
+      octx.restore();
+    };
+
+    // ── Brush-reveal mode ──────────────────────────────────────────────────────
+    // Base: original painting crop. The user "paints" their pixel mosaic in.
+    startBrushRef.current = () => {
+      cancelAnimationFrame(rafRef.current);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, cw, canvasH);
+      ctx.drawImage(userCanvas, uCropX, uCropY, uVisW, uVisH, uDrawX, uDrawY, uDrawW, uDrawH);
+      ctx.drawImage(p1, reconX, reconY, reconW, reconH);
+    };
+
+    const brushRad  = Math.max(18, reconW * 0.1);
+    revealAtRef.current = (mx: number, my: number) => {
+      const srcR = Math.max(1.5, patchR);
+      for (const i of patchesInRadius(matches, reconX, reconY, reconW, reconH, mx, my, brushRad)) {
+        const m  = matches[i];
+        const cx = reconX + m.focalNx * reconW;
+        const cy = reconY + m.focalNy * reconH;
+        ctx.save();
+        patchPath(ctx, cx, cy, patchR, patchShape, i);
+        ctx.clip();
+        ctx.drawImage(
+          userCanvas,
+          m.userNx * userCanvas.width  - srcR,
+          m.userNy * userCanvas.height - srcR,
+          srcR * 2, srcR * 2,
+          cx - patchR, cy - patchR,
+          patchR * 2, patchR * 2,
+        );
+        ctx.restore();
+      }
+    };
+
     // ── Animation starter ─────────────────────────────────────────────────────
     startAnimRef.current = () => {
       cancelAnimationFrame(rafRef.current);
@@ -949,12 +1117,12 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
           // Final: native-DPR draw for sharp Retina output
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(reconX, reconY, reconW, reconH);
-          for (const m of matches) {
+          for (let i = 0; i < matches.length; i++) {
+            const m = matches[i];
             const cx = reconX + m.focalNx * reconW;
             const cy = reconY + m.focalNy * reconH;
             ctx.save();
-            ctx.beginPath();
-            ctx.arc(cx, cy, patchR, 0, Math.PI * 2);
+            patchPath(ctx, cx, cy, patchR, patchShape, i);
             ctx.clip();
             const srcR = Math.max(1.5, patchR);
             ctx.drawImage(
@@ -992,8 +1160,17 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       cancelAnimationFrame(rafRef.current);
       startAnimRef.current = () => {};
       drawCompareRef.current = () => {};
+      drawTraceRef.current = () => {};
+      revealAtRef.current = () => {};
+      startBrushRef.current = () => {};
     };
-  }, [sourceImage, pd, patchCount, isLoading, isMobile]);
+  }, [sourceImage, pd, patchCount, isLoading, isMobile, patchShape, focalOverride]);
+
+  // A new painting resets any hand-picked focal region back to auto-detection.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFocalOverride(null);
+  }, [pd]);
 
   // ── IntersectionObserver: auto-play on scroll into view ──────────────────────
   useEffect(() => {
@@ -1014,6 +1191,18 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     observer.observe(canvas);
     return () => observer.disconnect();
   }, [pd, sourceImage, patchCount]);
+
+  // ── Replay the reveal when the patch shape changes ──────────────────────────
+  const prevShapeRef = useRef(patchShape);
+  useEffect(() => {
+    if (prevShapeRef.current !== patchShape) {
+      prevShapeRef.current = patchShape;
+      if (pd && sourceImage) {
+        if (brushModeRef.current) startBrushRef.current();
+        else if (!compareModeRef.current) startAnimRef.current();
+      }
+    }
+  });
 
   // ── Mouse handlers ────────────────────────────────────────────────────────────
   const clearLongPress = useCallback(() => {
@@ -1069,12 +1258,35 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       return;
     }
 
+    if (brushModeRef.current) {
+      // Mouse reveals on hover; touch reveals while the finger is down.
+      if (inRecon && (e.pointerType === "mouse" || isDraggingRef.current)) {
+        revealAtRef.current(mx, my);
+      }
+      return;
+    }
+
     if (inRecon) {
       const fnx = (mx - reconX) / reconW;
       const fny = (my - reconY) / reconH;
       setHoverNorm({ nx: fnx, ny: fny });
+
+      // Live source-tracing: only with a mouse (touch uses long-press popup).
+      if (e.pointerType === "mouse" && phasesRef.current) {
+        const match = findClosestMatch(phasesRef.current.matches, fnx, fny);
+        drawTraceRef.current(match);
+        if (match) {
+          const [slx, sly] = toScreenRef.current(match.userNx, match.userNy);
+          const cssScale = rect.width / cwRef.current;
+          setHoverTrace({ match, lensCssX: slx * cssScale, lensCssY: sly * cssScale });
+        } else {
+          setHoverTrace(null);
+        }
+      }
     } else {
       setHoverNorm(null);
+      drawTraceRef.current(null);
+      setHoverTrace(null);
     }
   }, [clearLongPress]);
 
@@ -1087,6 +1299,12 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
     const my    = (e.clientY - rect.top)  * scale;
     const { reconX, reconY, reconW, reconH } = layout;
     if (mx >= reconX && mx <= reconX + reconW && my >= reconY && my <= reconY + reconH) {
+      if (brushModeRef.current) {
+        isDraggingRef.current = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        revealAtRef.current(mx, my);
+        return;
+      }
       if (!compareModeRef.current && e.pointerType !== "mouse") {
         const canvas = e.currentTarget;
         const clientX = e.clientX;
@@ -1112,7 +1330,7 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
       suppressClickRef.current = false;
       return;
     }
-    if (compareModeRef.current) return;
+    if (compareModeRef.current || brushModeRef.current) return;
     openPatchAt(e.currentTarget, e.clientX, e.clientY);
   }, [openPatchAt]);
 
@@ -1189,7 +1407,15 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
   return (
     <div className="flex flex-col items-center gap-3">
       {focal && artwork && (
-        <PaintingLocator focal={focal} artwork={artwork} hoverNorm={hoverNorm} />
+        <PaintingLocator
+          focal={focal}
+          artwork={artwork}
+          hoverNorm={hoverNorm}
+          editable={!!sourceImage && !!pd}
+          isCustom={focalOverride !== null}
+          onFocalChange={setFocalOverride}
+          onReset={() => setFocalOverride(null)}
+        />
       )}
 
       {/* Canvas wrapper — relative so overlays can be positioned inside */}
@@ -1198,8 +1424,8 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
           ref={canvasRef}
           className="max-w-full touch-manipulation rounded shadow-md"
           style={{
-            cursor: compareMode ? "ew-resize" : "crosshair",
-            touchAction: compareMode ? "none" : "manipulation",
+            cursor: compareMode ? "ew-resize" : brushMode ? "cell" : "crosshair",
+            touchAction: compareMode || brushMode ? "none" : "manipulation",
           }}
           onPointerMove={handlePointerMove}
           onPointerDown={handlePointerDown}
@@ -1208,10 +1434,27 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
           onPointerLeave={() => {
             clearLongPress();
             setHoverNorm(null);
+            setHoverTrace(null);
+            drawTraceRef.current(null);
             isDraggingRef.current = false;
           }}
           onClick={handleClick}
         />
+        {/* Hover-trace overlay (live thread); never intercepts pointer events */}
+        <canvas
+          ref={overlayRef}
+          className="pointer-events-none absolute left-0 top-0 max-w-full"
+          style={{ width: "100%", height: "100%" }}
+        />
+        {/* Hover magnifier showing the exact source pixel, zoomed */}
+        {!compareMode && !brushMode && hoverTrace && renderPhases && (
+          <HoverMagnifier
+            match={hoverTrace.match}
+            userCanvas={renderPhases.userCanvas}
+            cssX={hoverTrace.lensCssX}
+            cssY={hoverTrace.lensCssY}
+          />
+        )}
         {/* Click-patch popup */}
         {!compareMode && clickedMatch && renderPhases && (
           <PatchPopup
@@ -1224,6 +1467,27 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
         )}
       </div>
 
+      {pd && sourceImage && (
+        <div className="flex w-full max-w-[900px] flex-wrap items-center gap-2 px-1">
+          <span className="museum-label text-neutral-400">Patch style</span>
+          {(["circle", "square", "brush"] as PatchShape[]).map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => setPatchShape(s)}
+              aria-pressed={patchShape === s}
+              className={`min-h-9 touch-manipulation rounded-full border px-3 py-1 text-xs capitalize transition active:scale-[0.97] sm:min-h-0 ${
+                patchShape === s
+                  ? "border-neutral-800 bg-neutral-900 text-white"
+                  : "border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-50"
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div className="flex w-full max-w-[900px] flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
         <p className="museum-caption text-xs text-neutral-400">{statusLine}</p>
         <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:items-center">
@@ -1232,7 +1496,10 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
               const next = !compareMode;
               setCompareMode(next);
               compareModeRef.current = next;
+              if (next) { setBrushMode(false); brushModeRef.current = false; }
               setClickedMatch(null);
+              setHoverTrace(null);
+              drawTraceRef.current(null);
               if (next) drawCompareRef.current(sliderNormRef.current);
               else      startAnimRef.current();
             }}
@@ -1244,14 +1511,37 @@ export default function CanvasRenderer({ sourceImage, artwork, patchCount }: Pro
           </button>
           <button
             onClick={() => {
+              const next = !brushMode;
+              setBrushMode(next);
+              brushModeRef.current = next;
+              if (next) { setCompareMode(false); compareModeRef.current = false; }
+              setClickedMatch(null);
+              setHoverTrace(null);
+              drawTraceRef.current(null);
+              if (next) startBrushRef.current();
+              else      startAnimRef.current();
+            }}
+            disabled={!pd || !sourceImage}
+            className={`inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border px-4 py-1.5 text-xs transition active:scale-[0.97] disabled:opacity-40 sm:min-h-0 ${
+              brushMode
+                ? "border-neutral-800 bg-neutral-900 text-white hover:bg-neutral-700"
+                : "border-neutral-300 bg-white text-neutral-600 hover:bg-neutral-50"
+            }`}
+          >
+            <Paintbrush className="h-3.5 w-3.5" />
+            {brushMode ? "✕ Brush" : "Brush reveal"}
+          </button>
+          <button
+            onClick={() => {
               if (compareMode) return;
-              startAnimRef.current();
+              if (brushMode) startBrushRef.current();
+              else           startAnimRef.current();
             }}
             disabled={!pd || !sourceImage || compareMode}
             className="inline-flex min-h-11 touch-manipulation items-center justify-center gap-1.5 rounded-full border border-neutral-300 bg-white px-4 py-1.5 text-xs text-neutral-600 transition active:scale-[0.97] hover:bg-neutral-50 disabled:opacity-40 sm:min-h-0"
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            ↺ Replay
+            {brushMode ? "↺ Clear" : "↺ Replay"}
           </button>
           <button
             onClick={handleExport}
