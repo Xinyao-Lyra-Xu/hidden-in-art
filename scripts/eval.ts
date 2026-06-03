@@ -9,14 +9,33 @@
 //
 // Determinism is helped by temperature 0 + structural (not prose) assertions.
 // Requires LLM_API_KEY (loaded from .env.local if present).
+//
+// Free tiers cap requests-per-minute (Gemini ~10 RPM). Each case's tool loop
+// makes several calls, so calls are throttled to a minimum interval by default
+// (--interval <ms>, 0 to disable) to stay under the limit.
 
 import { runChatTurn } from "@/application/agentChat";
 import { resolveLlmConfig, MissingLlmKeyError } from "@/infrastructure/llm/config";
 import { createOpenAiCompatCaller } from "@/infrastructure/llm/openaiCompatCaller";
 import { withRetry } from "@/infrastructure/llm/retry";
 import { LlmHttpError, LlmTimeoutError } from "@/infrastructure/llm/errors";
+import type { LlmCaller } from "@/domain/agent/runner";
 import { EVAL_CASES } from "../eval/cases";
 import { EVAL_LIBRARY } from "../eval/library";
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Enforce a minimum gap between model calls to respect free-tier RPM limits.
+function throttleCaller(caller: LlmCaller, minIntervalMs: number): LlmCaller {
+  if (minIntervalMs <= 0) return caller;
+  let last = 0;
+  return async (args) => {
+    const wait = last + minIntervalMs - Date.now();
+    if (wait > 0) await sleep(wait);
+    last = Date.now();
+    return caller(args);
+  };
+}
 
 // Provider/transport problems (auth, disabled API, quota, timeout) mean the eval
 // can't measure agent behavior at all — exit distinctly so it's not mistaken for
@@ -42,11 +61,21 @@ function parseRuns(argv: string[]): number {
   return 1;
 }
 
+function parseInterval(argv: string[]): number {
+  const i = argv.indexOf("--interval");
+  if (i >= 0 && argv[i + 1]) {
+    const n = Number(argv[i + 1]);
+    if (Number.isFinite(n) && n >= 0) return Math.floor(n);
+  }
+  return 6500; // ~9 calls/min, under Gemini free-tier 10 RPM
+}
+
 // Resolve to an exit code instead of calling process.exit() mid-loop: an abrupt
 // exit while undici keep-alive sockets are still open trips a libuv assertion on
 // Windows. Setting process.exitCode and returning lets the loop drain cleanly.
 async function main(): Promise<number> {
   const runs = parseRuns(process.argv.slice(2));
+  const intervalMs = parseInterval(process.argv.slice(2));
 
   let config;
   try {
@@ -60,12 +89,16 @@ async function main(): Promise<number> {
   }
 
   // temperature 0 for repeatability; modest output cap to keep cost down.
-  const caller = withRetry(
-    createOpenAiCompatCaller({ ...config, temperature: 0, maxOutputTokens: config.maxOutputTokens ?? 512 }),
-    { maxAttempts: 3 },
+  // Retry is patient (free-tier 429s want a long wait); throttle spaces calls.
+  const caller = throttleCaller(
+    withRetry(
+      createOpenAiCompatCaller({ ...config, temperature: 0, maxOutputTokens: config.maxOutputTokens ?? 512 }),
+      { maxAttempts: 5, baseDelayMs: 2000, maxDelayMs: 30_000 },
+    ),
+    intervalMs,
   );
 
-  console.log(`\nArt-agent eval · model=${config.model} · runs=${runs}\n`);
+  console.log(`\nArt-agent eval · model=${config.model} · runs=${runs} · interval=${intervalMs}ms\n`);
 
   let checksTotal = 0;
   let checksPassed = 0;
