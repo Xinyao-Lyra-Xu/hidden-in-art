@@ -62,8 +62,21 @@ to the OpenAI dialect for the provider):
 | `set_color_matching` | `nearest` / `dither` / `jitter` blending |
 | `adjust_abstraction` | More/less abstract |
 | `set_focal_region` | Where detail concentrates |
+| `search_paintings` | Semantic lookup over the library (story, mood, brushwork) |
 
 The API key lives only on the server; it is never exposed to the browser.
+
+### Semantic retrieval (RAG)
+
+`set_target_painting` and `search_paintings` are backed by embeddings, so the
+agent resolves requests by **meaning** — "a swirling emotional sky" finds Van
+Gogh, "something calm and domestic" finds Vermeer — and can ground art-history
+answers in curated notes the keyword matcher never sees. The corpus vectors are
+precomputed offline with `npm run embed` and committed, so at runtime only the
+user's query is embedded; unit tests and the offline eval stay deterministic and
+key-free. RAG is optional: with no embedding key set, selection falls back to the
+deterministic keyword matcher. The embedder is resolved independently of the chat
+model (`LLM_EMBED_*`) and defaults to Gemini's free embedding model.
 
 ---
 
@@ -125,6 +138,8 @@ application layer are tested with scripted responses — no key, no network.
 | `npm test` | Unit tests (Node test runner, offline, no key) |
 | `npm run eval` | Behavioral eval — **offline replay** of recorded cassettes |
 | `npm run eval:record` | Re-record cassettes against the real model (needs a key) |
+| `npm run embed` | Precompute the RAG corpus embeddings (needs a key) |
+| `npm run embed:check` | Verify the committed embeddings are in sync (needs a key) |
 
 `npm run eval -- --runs 3` replays multiple times; `npm run eval -- --record --force`
 re-records every case.

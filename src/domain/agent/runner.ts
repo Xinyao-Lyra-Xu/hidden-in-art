@@ -9,6 +9,12 @@
 
 import { ART_AGENT_TOOLS, executeTool, type ToolDefinition } from "./tools";
 import type { AgentArtwork, AgentSettings } from "./types";
+import type { Retriever } from "./retriever";
+
+// Tools whose `query` input is semantically searched against the corpus before
+// the tool runs. The runner embeds the query (async) and hands the hits to the
+// otherwise-synchronous executeTool via ToolContext.retrieval.
+const RETRIEVAL_TOOLS = new Set(["search_paintings", "set_target_painting"]);
 
 export type TextBlock = { type: "text"; text: string };
 export type ToolUseBlock = {
@@ -46,6 +52,10 @@ export type LlmCaller = (args: {
   system: string;
   messages: Message[];
   tools: ToolDefinition[];
+  // Optional streaming hook: a caller that streams its response invokes this with
+  // each text fragment as it arrives. Non-streaming callers (tests, eval, VCR)
+  // simply never call it, so behaviour is unchanged for them.
+  onText?: (delta: string) => void;
 }) => Promise<LlmResponse>;
 
 export type ToolCallRecord = {
@@ -68,6 +78,7 @@ export type AgentTurnResult = {
 export type AgentEvent =
   | { type: "llm_call_start"; step: number }
   | { type: "llm_call_end"; step: number; stopReason: string; ms: number; usage?: TokenUsage }
+  | { type: "text_delta"; step: number; delta: string }
   | { type: "tool_call"; step: number; name: string; ok: boolean; ms: number }
   | { type: "turn_end"; steps: number; toolCalls: number; replyChars: number; totalTokens: number }
   | { type: "max_steps"; steps: number }
@@ -126,8 +137,12 @@ export async function runAgentTurn(args: {
   // Stop the tool loop once cumulative token usage reaches this budget, so a
   // misbehaving model can't run up an unbounded bill. undefined = no budget.
   maxTokens?: number;
+  // Semantic retrieval over the painting corpus (RAG). Injected like callLlm so
+  // the domain stays network-free; absent = the keyword matcher handles
+  // selection and search_paintings reports nothing found.
+  retrieve?: Retriever;
 }): Promise<AgentTurnResult> {
-  const { userMessage, callLlm, library } = args;
+  const { userMessage, callLlm, library, retrieve } = args;
   const maxSteps = args.maxSteps ?? DEFAULT_MAX_STEPS;
   const maxTokens = args.maxTokens;
   const emit = args.onEvent ?? (() => {});
@@ -147,6 +162,11 @@ export async function runAgentTurn(args: {
       system: buildSystemPrompt(settings, library),
       messages,
       tools: ART_AGENT_TOOLS,
+      // Forward streamed text fragments as events. A streaming caller drives this
+      // live; a non-streaming caller leaves it untouched (no text_delta emitted).
+      onText: (delta) => {
+        if (delta) emit({ type: "text_delta", step, delta });
+      },
     });
     totalTokens += response.usage?.totalTokens ?? 0;
     emit({
@@ -178,7 +198,21 @@ export async function runAgentTurn(args: {
 
     for (const use of toolUses) {
       const toolStartedAt = nowMs();
-      const result = executeTool(use.name, use.input, { settings, library });
+      // For retrieval-aware tools, embed the query and resolve corpus hits first,
+      // then run the (synchronous) tool with those hits in context. A failed or
+      // absent retriever degrades to no hits rather than aborting the turn.
+      let retrieval;
+      if (retrieve && RETRIEVAL_TOOLS.has(use.name)) {
+        const query = typeof use.input.query === "string" ? use.input.query : "";
+        if (query) {
+          try {
+            retrieval = await retrieve(query);
+          } catch {
+            retrieval = undefined;
+          }
+        }
+      }
+      const result = executeTool(use.name, use.input, { settings, library, retrieval });
       if (result.ok) settings = { ...settings, ...result.patch };
       emit({
         type: "tool_call",
@@ -208,6 +242,9 @@ export async function runAgentTurn(args: {
     if (maxTokens !== undefined && totalTokens >= maxTokens) {
       emit({ type: "budget_exceeded", totalTokens, budget: maxTokens });
       const reply = "I've applied what I could within this turn's limit — tell me what to refine.";
+      // The model never produced this text, so stream it as one delta to keep the
+      // SSE client's "reply = concatenated text_deltas" contract uniform.
+      emit({ type: "text_delta", step, delta: reply });
       emit({
         type: "turn_end",
         steps: step + 1,
@@ -224,6 +261,8 @@ export async function runAgentTurn(args: {
   emit({ type: "max_steps", steps: maxSteps });
   const reply =
     "I've made several adjustments — take a look and tell me what to tweak next.";
+  // Stream the synthesized reply as one delta (see budget path above).
+  emit({ type: "text_delta", step: maxSteps, delta: reply });
   emit({
     type: "turn_end",
     steps: maxSteps,

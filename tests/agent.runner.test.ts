@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildSystemPrompt,
   runAgentTurn,
+  type AgentEvent,
   type LlmCaller,
   type LlmResponse,
   type ToolUseBlock,
@@ -129,6 +130,105 @@ test("stops at maxSteps instead of looping forever", async () => {
   assert.ok(result.reply.length > 0);
   // patchCount climbed by 3 × slight(400), clamped within bounds
   assert.equal(result.settings.patchCount, 2500 + 3 * 400);
+});
+
+test("forwards a streaming caller's text fragments as ordered text_delta events", async () => {
+  // A caller that streams its reply via onText, the way the real streaming caller
+  // does, then resolves with the assembled response.
+  const caller: LlmCaller = async (args) => {
+    args.onText?.("Hel");
+    args.onText?.("lo");
+    return { stop_reason: "end_turn", content: [{ type: "text", text: "Hello" }] };
+  };
+
+  const events: AgentEvent[] = [];
+  const result = await runAgentTurn({
+    userMessage: "hi",
+    callLlm: caller,
+    onEvent: (e) => events.push(e),
+    ...base,
+  });
+
+  const deltas = events
+    .filter((e): e is Extract<AgentEvent, { type: "text_delta" }> => e.type === "text_delta")
+    .map((e) => e.delta);
+  assert.deepEqual(deltas, ["Hel", "lo"]);
+  // The returned reply still equals the model's final text.
+  assert.equal(result.reply, "Hello");
+});
+
+test("runner embeds the query and feeds retrieval hits to search_paintings", async () => {
+  const { caller } = scripted([
+    toolResp(toolUse("search_paintings", { query: "swirling emotional sky" })),
+    textResp("That's Van Gogh's Wheat Field with Cypresses — built from spiraling strokes."),
+  ]);
+
+  const queries: string[] = [];
+  const retrieve = async (query: string) => {
+    queries.push(query);
+    return [
+      {
+        id: "met-437984",
+        title: "Wheat Field with Cypresses",
+        artist: "Vincent van Gogh",
+        text: "spiraling strokes follow each form",
+        score: 0.88,
+      },
+    ];
+  };
+
+  const result = await runAgentTurn({
+    userMessage: "tell me about a swirling sky painting",
+    callLlm: caller,
+    retrieve,
+    ...base,
+  });
+
+  // The runner embedded the tool's query exactly once.
+  assert.deepEqual(queries, ["swirling emotional sky"]);
+  // The retrieved curatorial text was handed back to the model as a tool result.
+  const toolResultMsg = result.messages[2];
+  const block = (toolResultMsg.content as { content: string }[])[0];
+  assert.match(block.content, /spiraling strokes/);
+  assert.equal(result.toolCalls[0].ok, true);
+});
+
+test("runner does not embed for tools that don't take a query", async () => {
+  const { caller } = scripted([
+    toolResp(toolUse("set_patch_density", { direction: "more" })),
+    textResp("Tightened the detail."),
+  ]);
+  let called = false;
+  const retrieve = async () => {
+    called = true;
+    return [];
+  };
+  await runAgentTurn({
+    userMessage: "more detail",
+    callLlm: caller,
+    retrieve,
+    ...base,
+  });
+  assert.equal(called, false);
+});
+
+test("runner survives a retriever that throws and still completes the turn", async () => {
+  const { caller } = scripted([
+    toolResp(toolUse("search_paintings", { query: "x" })),
+    textResp("I couldn't search just now."),
+  ]);
+  const retrieve = async () => {
+    throw new Error("embedding service down");
+  };
+  const result = await runAgentTurn({
+    userMessage: "find me something",
+    callLlm: caller,
+    retrieve,
+    ...base,
+  });
+  // search_paintings reported failure (no hits), but the turn finished cleanly.
+  assert.equal(result.toolCalls[0].ok, false);
+  assert.match(result.reply, /couldn't search/);
 });
 
 test("buildSystemPrompt reflects the live settings and library", () => {

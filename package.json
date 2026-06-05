@@ -11,6 +11,8 @@
     "test": "node --import ./tests/register.mjs --test \"tests/**/*.test.ts\"",
     "eval": "node --import ./tests/register.mjs scripts/eval.ts",
     "eval:record": "node --import ./tests/register.mjs scripts/eval.ts --record",
+    "embed": "node --import ./tests/register.mjs scripts/embed.ts",
+    "embed:check": "node --import ./tests/register.mjs scripts/embed.ts --check",
     "import:met": "tsx scripts/importMetArtworks.ts",
     "build:paintings": "tsx scripts/buildPaintingLibrary.ts"
   },

@@ -23,10 +23,15 @@ import {
   clampPatchCount,
 } from "./settings";
 import { matchArtwork } from "./matchArtwork";
+import type { RetrievedDoc } from "./retriever";
 
 export type ToolContext = {
   settings: AgentSettings;
   library: AgentArtwork[];
+  // Semantic-search hits for this tool call's `query`, resolved by the runner
+  // *before* the tool runs (the embedding is async; tool execution stays sync).
+  // Absent when RAG isn't wired or the tool takes no query.
+  retrieval?: RetrievedDoc[];
 };
 
 export type ToolResult = {
@@ -135,6 +140,22 @@ export const ART_AGENT_TOOLS: ToolDefinition[] = [
       required: ["region"],
     },
   },
+  {
+    name: "search_paintings",
+    description:
+      "Look up paintings in the library by meaning, not just keywords. Use this to answer questions about a painting's story, artist, or brushwork, or to find candidates before setting a target. Returns the most relevant paintings with curatorial notes. This does NOT change any settings.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "What to search for — a subject, mood, technique, artist, or question (e.g. 'how did Van Gogh build texture', 'something calm and domestic').",
+        },
+      },
+      required: ["query"],
+    },
+  },
 ];
 
 function fail(summary: string): ToolResult {
@@ -153,6 +174,22 @@ function num(input: Record<string, unknown>, key: string): number | undefined {
 
 function setTargetPainting(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
   const query = str(input, "query") ?? "";
+
+  // Prefer the semantic match when RAG is wired: it understands subject, mood and
+  // technique ("a swirling emotional sky"), which the keyword matcher can't. Only
+  // accept a hit the renderer can actually use (present in the live library).
+  const inLibrary = new Set(ctx.library.map((a) => a.id));
+  const semantic = ctx.retrieval?.find((h) => inLibrary.has(h.id));
+  if (semantic) {
+    return {
+      ok: true,
+      patch: { targetArtworkId: semantic.id },
+      summary: `Target set to "${semantic.title}" by ${semantic.artist}.`,
+    };
+  }
+
+  // No retriever (offline tests/eval) or no usable hit — fall back to the
+  // deterministic keyword matcher.
   const matches = matchArtwork(query, ctx.library);
   if (matches.length === 0) {
     return fail(`Nothing in the library matches "${query}". Try an artist or subject.`);
@@ -218,6 +255,27 @@ function setFocalRegion(input: Record<string, unknown>): ToolResult {
   };
 }
 
+// How many retrieved paintings to surface back to the model for a knowledge
+// lookup. Enough to give context without flooding the prompt.
+const SEARCH_RESULT_LIMIT = 3;
+
+function searchPaintings(ctx: ToolContext): ToolResult {
+  const hits = (ctx.retrieval ?? []).slice(0, SEARCH_RESULT_LIMIT);
+  if (hits.length === 0) {
+    // No retrieval wired, or nothing matched — let the model fall back to the
+    // library list in the system prompt rather than inventing facts.
+    return fail("No painting matched that search. Try a different description.");
+  }
+  const body = hits
+    .map((h, i) => `${i + 1}. "${h.title}" by ${h.artist} — ${h.text}`)
+    .join("\n");
+  return {
+    ok: true,
+    patch: {},
+    summary: `Most relevant paintings:\n${body}`,
+  };
+}
+
 export function executeTool(
   name: string,
   input: Record<string, unknown>,
@@ -234,6 +292,8 @@ export function executeTool(
       return adjustAbstractionTool(input, ctx);
     case "set_focal_region":
       return setFocalRegion(input);
+    case "search_paintings":
+      return searchPaintings(ctx);
     default:
       return fail(`Unknown tool "${name}".`);
   }
