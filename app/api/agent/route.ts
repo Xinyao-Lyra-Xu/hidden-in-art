@@ -123,6 +123,7 @@ async function handleTurn(
   const retrieve =
     createConfiguredRetriever({
       onRetry: ({ attempt, delayMs }) => log.warn("retrying embed call", { attempt, delayMs }),
+      onWarn: (message) => log.warn("rag disabled", { reason: message }),
     }) ?? undefined;
 
   try {

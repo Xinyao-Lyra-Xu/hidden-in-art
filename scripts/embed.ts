@@ -11,7 +11,7 @@
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { buildCorpus } from "@/domain/agent/corpus";
+import { buildCorpus, diffCorpus } from "@/domain/agent/corpus";
 import type { AgentArtwork } from "@/domain/agent/types";
 import { resolveEmbeddingConfig, MissingLlmKeyError } from "@/infrastructure/llm/config";
 import { createOpenAiCompatEmbedder } from "@/infrastructure/llm/embedder";
@@ -56,6 +56,29 @@ function loadLibrary(): AgentArtwork[] {
 async function main(): Promise<void> {
   const check = process.argv.includes("--check");
 
+  const library = loadLibrary();
+  const corpus = buildCorpus(library);
+
+  // --check is pure and key-free: rebuild the corpus from source and compare its
+  // text to what was embedded. Catches stale notes without a model call, so it
+  // can run in CI. The real embed below is the only path that needs a key.
+  if (check) {
+    const existing = readExisting();
+    if (!existing) {
+      console.error("embed --check: no embeddings.json found. Run `npm run embed`.");
+      process.exit(1);
+    }
+    const diff = diffCorpus(corpus, existing.docs);
+    if (!diff.ok) {
+      console.error(`embed --check: embeddings.json is stale — ${diff.reason}. Run \`npm run embed\`.`);
+      process.exit(1);
+    }
+    console.log(
+      `embed --check: in sync (${corpus.length} paintings, ${existing.model}/${existing.dim}).`,
+    );
+    return;
+  }
+
   let config;
   try {
     config = resolveEmbeddingConfig();
@@ -69,8 +92,6 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const library = loadLibrary();
-  const corpus = buildCorpus(library);
   console.log(
     `embed: ${corpus.length} paintings via ${config.provider}/${config.model}` +
       (config.dimensions ? ` (dim ${config.dimensions})` : ""),
@@ -98,22 +119,6 @@ async function main(): Promise<void> {
       vector: vectors[i],
     })),
   };
-
-  if (check) {
-    const existing = readExisting();
-    const ok =
-      existing !== null &&
-      existing.model === out.model &&
-      existing.dim === out.dim &&
-      existing.docs.length === out.docs.length &&
-      existing.docs.every((d, i) => d.id === out.docs[i]?.id);
-    if (!ok) {
-      console.error("embed --check: embeddings.json is stale. Run `npm run embed`.");
-      process.exit(1);
-    }
-    console.log("embed --check: embeddings.json is in sync.");
-    return;
-  }
 
   writeFileSync(OUT_PATH, JSON.stringify(out) + "\n");
   console.log(`embed: wrote ${out.docs.length} vectors (dim ${dim}) to ${OUT_PATH}`);

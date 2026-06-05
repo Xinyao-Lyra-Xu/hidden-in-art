@@ -7,7 +7,7 @@ import {
   rankBySimilarity,
   type VectorDoc,
 } from "@/domain/agent/retrieval";
-import { buildCorpus, buildCorpusDoc } from "@/domain/agent/corpus";
+import { buildCorpus, buildCorpusDoc, diffCorpus } from "@/domain/agent/corpus";
 import { FIXTURE_LIBRARY } from "./fixtures";
 
 // ── cosine math ──────────────────────────────────────────────────────────────
@@ -106,4 +106,39 @@ test("buildCorpus produces one doc per library entry", () => {
     corpus.map((d) => d.id),
     FIXTURE_LIBRARY.map((a) => a.id),
   );
+});
+
+// ── staleness detection (diffCorpus) ─────────────────────────────────────────
+
+test("diffCorpus reports ok when source matches the embedded text", () => {
+  const corpus = buildCorpus(FIXTURE_LIBRARY);
+  const stored = corpus.map((d) => ({ id: d.id, text: d.text }));
+  assert.deepEqual(diffCorpus(corpus, stored), { ok: true });
+});
+
+test("diffCorpus flags a changed painting count", () => {
+  const corpus = buildCorpus(FIXTURE_LIBRARY);
+  const stored = corpus.slice(0, -1).map((d) => ({ id: d.id, text: d.text }));
+  const diff = diffCorpus(corpus, stored);
+  assert.equal(diff.ok, false);
+  assert.match((diff as { reason: string }).reason, /count changed/);
+});
+
+test("diffCorpus flags a reordered / changed id", () => {
+  const corpus = buildCorpus(FIXTURE_LIBRARY);
+  const stored = corpus.map((d) => ({ id: d.id, text: d.text }));
+  stored[1] = { id: "different-id", text: stored[1].text };
+  const diff = diffCorpus(corpus, stored);
+  assert.equal(diff.ok, false);
+  assert.match((diff as { reason: string }).reason, /id changed/);
+});
+
+test("diffCorpus flags drifted curatorial text (edited notes, not re-embedded)", () => {
+  const corpus = buildCorpus(FIXTURE_LIBRARY);
+  const stored = corpus.map((d) => ({ id: d.id, text: d.text }));
+  stored[0] = { id: stored[0].id, text: stored[0].text + " (an edit nobody re-embedded)" };
+  const diff = diffCorpus(corpus, stored);
+  assert.equal(diff.ok, false);
+  assert.match((diff as { reason: string }).reason, /text changed/);
+  assert.match((diff as { reason: string }).reason, new RegExp(corpus[0].id));
 });
