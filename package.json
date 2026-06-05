@@ -8,18 +8,25 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test": "node --import ./tests/register.mjs --test \"tests/**/*.test.ts\"",
+    "test": "node --import ./tests/register.mjs --test \"tests/*.test.ts\"",
+    "test:integration": "node --import ./tests/register.mjs --test \"tests/integration/**/*.test.ts\"",
     "eval": "node --import ./tests/register.mjs scripts/eval.ts",
     "eval:record": "node --import ./tests/register.mjs scripts/eval.ts --record",
     "embed": "node --import ./tests/register.mjs scripts/embed.ts",
     "embed:check": "node --import ./tests/register.mjs scripts/embed.ts --check",
     "embed:eval": "node --import ./tests/register.mjs scripts/embedEvalQueries.ts",
     "import:met": "tsx scripts/importMetArtworks.ts",
-    "build:paintings": "tsx scripts/buildPaintingLibrary.ts"
+    "build:paintings": "tsx scripts/buildPaintingLibrary.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node --import ./tests/register.mjs scripts/dbMigrate.ts",
+    "db:seed": "node --import ./tests/register.mjs scripts/dbSeed.ts",
+    "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.2",
     "lucide-react": "^1.14.0",
     "next": "16.2.6",
+    "pg": "^8.21.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "recharts": "^3.8.1"
@@ -27,8 +34,10 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",

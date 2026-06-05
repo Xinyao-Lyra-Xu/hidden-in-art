@@ -78,6 +78,27 @@ key-free. RAG is optional: with no embedding key set, selection falls back to th
 deterministic keyword matcher. The embedder is resolved independently of the chat
 model (`LLM_EMBED_*`) and defaults to Gemini's free embedding model.
 
+#### Vector store: in-memory or Postgres + pgvector
+
+By default the ranking scores the committed vectors in-process. Set `DATABASE_URL`
+to push it into **Postgres + pgvector** instead (HNSW index, cosine distance).
+Postgres is a *query backend* for the same vectors — seeded from `embeddings.json`,
+never a second source of truth — so the offline `embed` pipeline stays canonical
+and the DB can't drift from it. Any standard Postgres works (the driver honours
+`sslmode` in the URL); [Neon](https://neon.tech) and [Supabase](https://supabase.com)
+both ship pgvector free, or run the `pgvector/pgvector` Docker image locally.
+
+```bash
+# Put a connection string in .env.local (git-ignored — never commit it):
+#   DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
+npm run db:migrate   # create the table + HNSW index (installs the pgvector extension)
+npm run db:seed      # load embeddings.json into Postgres
+```
+
+The retriever prefers Postgres but falls back to the in-memory vectors on any
+query-time DB error, just as a missing embedding key falls back to keyword
+matching — a turn never fails for the database or RAG.
+
 ---
 
 ## Architecture
@@ -94,6 +115,7 @@ src/
 │   └── agentChat.ts
 ├── infrastructure/      # the outside world (injected into the domain)
 │   ├── llm/             # OpenAI-compat caller, translation, retry, config, errors
+│   ├── db/              # Drizzle schema + client + pgvector retriever (optional)
 │   ├── observability/   # structured JSON logger
 │   └── ratelimit/       # in-process + Upstash Redis limiters
 ├── components/          # React UI (AgentChat)
@@ -120,6 +142,9 @@ application layer are tested with scripted responses — no key, no network.
 - **Global rate limiting** — set `UPSTASH_REDIS_REST_URL`/`TOKEN` to share the
   limit across instances (atomic Lua token bucket); falls back to in-process and
   fails open if Redis is unreachable.
+- **Pluggable vector store** — RAG ranks the committed vectors in-process by
+  default, or in **Postgres + pgvector** (Drizzle ORM, HNSW index) when
+  `DATABASE_URL` is set, with automatic fallback to in-memory on a DB error.
 - **Observability** — structured JSON logs with a per-request correlation id
   (`x-request-id`), LLM latency, token usage, and tool-call events.
 - **Behavioral evals** — offline replay (VCR cassettes; deterministic, no key)
@@ -136,11 +161,16 @@ application layer are tested with scripted responses — no key, no network.
 | `npm run lint` | ESLint |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Unit tests (Node test runner, offline, no key) |
+| `npm run test:integration` | pgvector retrieval test (needs `DATABASE_URL`; self-skips without one) |
 | `npm run eval` | Behavioral eval — **offline replay** of recorded cassettes |
 | `npm run eval:record` | Re-record cassettes against the real model (needs a key) |
 | `npm run embed` | Precompute the RAG corpus embeddings (needs a key) |
 | `npm run embed:check` | Verify the committed embeddings match the corpus (offline) |
 | `npm run embed:eval` | Re-record the retrieval-quality eval query vectors (needs a key) |
+| `npm run db:generate` | Generate a SQL migration from the Drizzle schema (offline) |
+| `npm run db:migrate` | Apply migrations to `DATABASE_URL` (installs pgvector) |
+| `npm run db:seed` | Load `embeddings.json` into the Postgres `paintings` table |
+| `npm run db:studio` | Browse the vector store in Drizzle Studio |
 
 `npm run eval -- --runs 3` replays multiple times; `npm run eval -- --record --force`
 re-records every case.
@@ -164,6 +194,7 @@ All optional except `LLM_API_KEY`. See `.env.example` for the full list.
 | `RATE_LIMIT_REFILL_PER_SEC` | `0.5` | Sustained refill rate |
 | `MAX_CONCURRENT_TURNS` | `4` | Max in-flight turns |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | — | Enable global (Redis) rate limiting |
+| `DATABASE_URL` | — | Postgres + pgvector store for RAG; unset = in-memory vectors |
 
 ---
 
@@ -171,8 +202,11 @@ All optional except `LLM_API_KEY`. See `.env.example` for the full list.
 
 - **Unit tests** are pure and offline (no key, no network) via a Node resolve
   hook that handles the `@/*` alias and TypeScript extensions.
-- **CI** (`.github/workflows/ci.yml`) runs lint → typecheck → test → **offline
-  eval** → build on every push and PR.
+- **CI** (`.github/workflows/ci.yml`) runs two parallel jobs on every push and
+  PR: `verify` (lint → typecheck → test → **offline eval** → build) and `db`,
+  which spins up a `pgvector/pgvector` service container, runs `db:migrate` +
+  `db:seed`, and asserts the Postgres retrieval path matches the in-memory
+  ranking — so the vector store stays covered by regression.
 
 ```bash
 npm test && npm run typecheck && npm run lint && npm run eval

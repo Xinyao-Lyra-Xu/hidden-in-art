@@ -14,6 +14,9 @@ import { withRetryFn } from "./retry";
 import { createRetriever, type Retriever } from "@/domain/agent/retriever";
 import type { CorpusDoc } from "@/domain/agent/corpus";
 import type { VectorDoc } from "@/domain/agent/retrieval";
+import type { Embedder } from "@/domain/agent/embedder";
+import { getDb } from "@/infrastructure/db/client";
+import { createDbRetriever } from "@/infrastructure/db/retriever";
 
 type EmbeddingsFile = {
   model: string;
@@ -70,13 +73,42 @@ export const ragMismatchReason = (config: { model: string; dimensions?: number }
 export type CreateRetrieverOptions = {
   onRetry?: (info: { attempt: number; delayMs: number; error: unknown }) => void;
   // Fired when RAG is disabled despite a key being present (model/dim mismatch),
-  // so the route can log why selection fell back to keyword matching.
+  // so the route can log why selection fell back to keyword matching. Also fired
+  // when a configured Postgres backend errors and we degrade to in-memory search.
   onWarn?: (message: string) => void;
 };
+
+// Wraps a Postgres-backed retriever so a transient DB failure degrades to the
+// committed in-memory vectors instead of dropping retrieval for the turn. The
+// vectors are identical (the DB is seeded from embeddings.json), so the only
+// observable difference on fallback is the ranking runs in Node — quality is
+// unchanged. Mirrors the "RAG is an enhancement, never a hard dependency" stance.
+function withInMemoryFallback(
+  primary: Retriever,
+  fallback: Retriever,
+  onWarn?: (message: string) => void,
+): Retriever {
+  return async (query, topK) => {
+    try {
+      return await primary(query, topK);
+    } catch (err) {
+      onWarn?.(
+        `Postgres retrieval failed (${err instanceof Error ? err.message : String(err)}) — ` +
+          "falling back to in-memory vectors for this query.",
+      );
+      return fallback(query, topK);
+    }
+  };
+}
 
 // Returns a provider-backed retriever, or null when RAG can't run safely — no
 // embedding key, or a model/dimension mismatch with the committed vectors. RAG
 // is an optional enhancement, never a hard dependency for a turn.
+//
+// When DATABASE_URL is set, the ranking is pushed into Postgres/pgvector (HNSW
+// index) with the in-memory vectors as a graceful fallback; otherwise the
+// committed vectors are scored in-process. Either way the corpus is the same
+// server-authoritative embeddings.json.
 export function createConfiguredRetriever(
   options: CreateRetrieverOptions = {},
 ): Retriever | null {
@@ -93,7 +125,7 @@ export function createConfiguredRetriever(
     return null;
   }
 
-  const embed = withRetryFn(
+  const embed: Embedder = withRetryFn(
     createOpenAiCompatEmbedder({
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
@@ -103,5 +135,14 @@ export function createConfiguredRetriever(
     { maxAttempts: 3, onRetry: options.onRetry },
   );
 
-  return createRetriever({ embed, corpus: CORPUS, vectors: VECTORS });
+  const inMemory = createRetriever({ embed, corpus: CORPUS, vectors: VECTORS });
+
+  // Prefer Postgres when configured; fall back to the in-memory vectors on any
+  // query-time DB error so a turn never fails for the database.
+  const db = getDb();
+  if (db) {
+    return withInMemoryFallback(createDbRetriever({ db, embed }), inMemory, options.onWarn);
+  }
+
+  return inMemory;
 }

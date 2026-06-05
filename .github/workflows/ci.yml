@@ -54,3 +54,52 @@ jobs:
           # so the build needs no real secret. Provide a dummy so any accidental
           # config read doesn't fail the build.
           LLM_API_KEY: ci-dummy-key
+
+  # Integration test for the optional Postgres + pgvector retrieval path. Runs a
+  # real pgvector instance as a service container, migrates + seeds it from the
+  # committed embeddings, then asserts the DB backend reproduces the in-memory
+  # ranking (tests/integration/db.pgvector.test.ts). No API key: the test embeds
+  # with a scripted vector, so it stays deterministic and offline-of-LLM.
+  db:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Stock Postgres + the pgvector extension preinstalled.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hidden_in_art
+        ports:
+          - 5432:5432
+        # Wait until Postgres accepts connections before the steps run.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # No sslmode: the local container speaks plaintext (Neon/Supabase URLs add
+      # ?sslmode=require — the driver honours whatever the URL specifies).
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/hidden_in_art
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Migrate (create table + HNSW index, install pgvector)
+        run: npm run db:migrate
+
+      - name: Seed (load committed embeddings into Postgres)
+        run: npm run db:seed
+
+      - name: Integration test (pgvector retrieval parity)
+        run: npm run test:integration
