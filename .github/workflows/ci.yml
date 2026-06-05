@@ -41,6 +41,12 @@ jobs:
         # Re-record locally with `npm run eval -- --record` after prompt changes.
         run: npm run eval
 
+      - name: Embeddings in sync
+        # Rebuilds the RAG corpus from source and checks it matches the committed
+        # vectors' text — catches edited curatorial notes that weren't re-embedded.
+        # Pure and offline; re-record locally with `npm run embed` after changes.
+        run: npm run embed:check
+
       - name: Build
         run: npm run build
         env:

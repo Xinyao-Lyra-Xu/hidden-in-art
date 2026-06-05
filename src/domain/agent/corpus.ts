@@ -43,3 +43,38 @@ export function buildCorpusDoc(artwork: AgentArtwork): CorpusDoc {
 export function buildCorpus(library: AgentArtwork[]): CorpusDoc[] {
   return library.map(buildCorpusDoc);
 }
+
+export type CorpusDiff = { ok: true } | { ok: false; reason: string };
+
+// Compares the corpus freshly built from source against the text stored in
+// embeddings.json. Pure and key-free: it catches the easy-to-miss case where
+// the curatorial notes (or library) changed but the embeddings were never
+// regenerated, which `embed --check` reports without a model call. Vectors are
+// always written together with their text, so matching text implies matching
+// vectors.
+export function diffCorpus(
+  current: CorpusDoc[],
+  stored: { id: string; text: string }[],
+): CorpusDiff {
+  if (current.length !== stored.length) {
+    return {
+      ok: false,
+      reason: `painting count changed: ${stored.length} embedded vs ${current.length} in source`,
+    };
+  }
+  for (let i = 0; i < current.length; i++) {
+    if (current[i].id !== stored[i].id) {
+      return {
+        ok: false,
+        reason: `painting #${i + 1} id changed: "${stored[i].id}" → "${current[i].id}"`,
+      };
+    }
+    if (current[i].text !== stored[i].text) {
+      return {
+        ok: false,
+        reason: `curatorial text changed for ${current[i].id} ("${current[i].title}")`,
+      };
+    }
+  }
+  return { ok: true };
+}

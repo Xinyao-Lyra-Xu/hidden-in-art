@@ -10,6 +10,7 @@
 import { ART_AGENT_TOOLS, executeTool, type ToolDefinition } from "./tools";
 import type { AgentArtwork, AgentSettings } from "./types";
 import type { Retriever } from "./retriever";
+import { PAINTING_DESCRIPTIONS, STROKE_DESCRIPTIONS } from "@/domain/artwork/paintingInfo";
 
 // Tools whose `query` input is semantically searched against the corpus before
 // the tool runs. The runner embeds the query (async) and hands the hits to the
@@ -92,11 +93,31 @@ const nowMs = (): number =>
     ? performance.now()
     : Date.now();
 
+// When a painting is the active style, fold its curatorial notes into the prompt
+// so the agent can speak to the *current* painting's story and brushwork without
+// a search round-trip. Pure id→text lookup, no embedding cost. Empty when no
+// target is set or the notes are missing.
+function buildTargetGrounding(settings: AgentSettings, library: AgentArtwork[]): string {
+  const id = settings.targetArtworkId;
+  if (!id) return "";
+  const art = library.find((a) => a.id === id);
+  if (!art) return "";
+  const description = PAINTING_DESCRIPTIONS[id];
+  const strokes = STROKE_DESCRIPTIONS[id];
+  if (!description && !strokes) return "";
+
+  const lines = [`Current painting — "${art.title}" by ${art.artist}:`];
+  if (description) lines.push(`  ${description}`);
+  if (strokes) lines.push(`  Brushwork: ${strokes}`);
+  return lines.join("\n");
+}
+
 export function buildSystemPrompt(settings: AgentSettings, library: AgentArtwork[]): string {
   const target = settings.targetArtworkId ?? "none";
   const catalog = library
     .map((a) => `- ${a.title} by ${a.artist} [${a.tags.join(", ")}]`)
     .join("\n");
+  const grounding = buildTargetGrounding(settings, library);
 
   return [
     "You are the Hidden in Art studio assistant. You help the user reconstruct",
@@ -110,6 +131,8 @@ export function buildSystemPrompt(settings: AgentSettings, library: AgentArtwork
     `  colorMatch=${settings.colorMatch}`,
     `  abstraction=${settings.abstraction}`,
     `  focalRegion=${settings.focalRegion}`,
+    // Only present once a painting is chosen; lets the agent discuss it directly.
+    ...(grounding ? ["", grounding] : []),
     "",
     "Painting library:",
     catalog,
@@ -141,8 +164,10 @@ export async function runAgentTurn(args: {
   // the domain stays network-free; absent = the keyword matcher handles
   // selection and search_paintings reports nothing found.
   retrieve?: Retriever;
+  // Optional cosine floor for search_paintings (see ToolContext.minScore).
+  minScore?: number;
 }): Promise<AgentTurnResult> {
-  const { userMessage, callLlm, library, retrieve } = args;
+  const { userMessage, callLlm, library, retrieve, minScore } = args;
   const maxSteps = args.maxSteps ?? DEFAULT_MAX_STEPS;
   const maxTokens = args.maxTokens;
   const emit = args.onEvent ?? (() => {});
@@ -212,7 +237,7 @@ export async function runAgentTurn(args: {
           }
         }
       }
-      const result = executeTool(use.name, use.input, { settings, library, retrieval });
+      const result = executeTool(use.name, use.input, { settings, library, retrieval, minScore });
       if (result.ok) settings = { ...settings, ...result.patch };
       emit({
         type: "tool_call",

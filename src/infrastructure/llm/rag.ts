@@ -37,12 +37,46 @@ const VECTORS: VectorDoc[] = data.docs.map((d) => ({ id: d.id, vector: d.vector 
 export const ragModel = data.model;
 export const ragDocCount = data.docs.length;
 
+// Optional cosine floor for search_paintings, read from LLM_RAG_MIN_SCORE.
+// Off by default: the on-vs-off-topic score gap is narrow and model-specific,
+// so a baked-in default would be brittle. Operators who've measured their
+// model's distribution can opt in (≈0.5 suits gemini-embedding-001). Returns
+// undefined for unset/blank/non-finite values.
+export function ragMinScore(env: Record<string, string | undefined> = process.env): number | undefined {
+  const raw = env.LLM_RAG_MIN_SCORE;
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+// The committed vectors are only comparable to a query embedded by the SAME
+// model and dimensionality. A different model (or truncation) with the same dim
+// produces plausible-but-wrong cosine scores — a silent quality failure — so we
+// refuse to retrieve rather than mislead. Pure, so it's unit-tested directly.
+export function embeddingsCompatible(
+  file: { model: string; dim: number },
+  config: { model: string; dimensions?: number },
+): boolean {
+  if (file.model !== config.model) return false;
+  if (config.dimensions !== undefined && config.dimensions !== file.dim) return false;
+  return true;
+}
+
+export const ragMismatchReason = (config: { model: string; dimensions?: number }): string =>
+  `embeddings.json was built with ${data.model}/${data.dim} but the configured ` +
+  `embedder is ${config.model}/${config.dimensions ?? "default"}. ` +
+  "Re-run `npm run embed` or align LLM_EMBED_* — falling back to keyword matching.";
+
 export type CreateRetrieverOptions = {
   onRetry?: (info: { attempt: number; delayMs: number; error: unknown }) => void;
+  // Fired when RAG is disabled despite a key being present (model/dim mismatch),
+  // so the route can log why selection fell back to keyword matching.
+  onWarn?: (message: string) => void;
 };
 
-// Returns a provider-backed retriever, or null when no embedding key is set
-// (RAG is an optional enhancement, never a hard dependency for a turn).
+// Returns a provider-backed retriever, or null when RAG can't run safely — no
+// embedding key, or a model/dimension mismatch with the committed vectors. RAG
+// is an optional enhancement, never a hard dependency for a turn.
 export function createConfiguredRetriever(
   options: CreateRetrieverOptions = {},
 ): Retriever | null {
@@ -52,6 +86,11 @@ export function createConfiguredRetriever(
   } catch (err) {
     if (err instanceof MissingLlmKeyError) return null;
     throw err;
+  }
+
+  if (!embeddingsCompatible({ model: data.model, dim: data.dim }, config)) {
+    options.onWarn?.(ragMismatchReason(config));
+    return null;
   }
 
   const embed = withRetryFn(

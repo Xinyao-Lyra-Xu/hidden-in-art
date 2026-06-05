@@ -48,3 +48,25 @@ export function rankBySimilarity(
   scored.sort((a, b) => b.score - a.score);
   return topK === undefined ? scored : scored.slice(0, Math.max(0, topK));
 }
+
+// Reciprocal Rank Fusion: merge several ranked id lists into one. Each list
+// contributes 1/(k + rank) to an id's score (rank is 0-based), so an id ranked
+// highly by *either* ranker floats up, and an id ranked well by *both* wins
+// outright. Ids missing from a list simply don't get its contribution. This is
+// how the agent blends semantic similarity with the keyword matcher: exact
+// artist names rank via keywords, fuzzy mood/technique via embeddings, without
+// either signal's raw scores needing to be comparable. k dampens the tail; 60
+// is the conventional default. Ties preserve first-seen order (stable sort).
+export const RRF_K = 60;
+
+export function fuseRankings(rankings: string[][], k: number = RRF_K): ScoredDoc[] {
+  const scores = new Map<string, number>();
+  for (const ranking of rankings) {
+    ranking.forEach((id, rank) => {
+      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank));
+    });
+  }
+  return [...scores.entries()]
+    .map(([id, score]) => ({ id, score }))
+    .sort((a, b) => b.score - a.score);
+}

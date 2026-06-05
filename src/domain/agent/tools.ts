@@ -23,6 +23,7 @@ import {
   clampPatchCount,
 } from "./settings";
 import { matchArtwork } from "./matchArtwork";
+import { fuseRankings } from "./retrieval";
 import type { RetrievedDoc } from "./retriever";
 
 export type ToolContext = {
@@ -32,6 +33,12 @@ export type ToolContext = {
   // *before* the tool runs (the embedding is async; tool execution stays sync).
   // Absent when RAG isn't wired or the tool takes no query.
   retrieval?: RetrievedDoc[];
+  // Optional cosine-similarity floor for search_paintings: hits below it are
+  // dropped so an off-topic question returns "nothing relevant" instead of
+  // grounding the model on weak matches. Undefined = no floor (default).
+  // Deliberately NOT applied to set_target_painting — selecting the closest
+  // style for any request is the desired behavior there.
+  minScore?: number;
 };
 
 export type ToolResult = {
@@ -174,27 +181,33 @@ function num(input: Record<string, unknown>, key: string): number | undefined {
 
 function setTargetPainting(input: Record<string, unknown>, ctx: ToolContext): ToolResult {
   const query = str(input, "query") ?? "";
-
-  // Prefer the semantic match when RAG is wired: it understands subject, mood and
-  // technique ("a swirling emotional sky"), which the keyword matcher can't. Only
-  // accept a hit the renderer can actually use (present in the live library).
   const inLibrary = new Set(ctx.library.map((a) => a.id));
-  const semantic = ctx.retrieval?.find((h) => inLibrary.has(h.id));
-  if (semantic) {
-    return {
-      ok: true,
-      patch: { targetArtworkId: semantic.id },
-      summary: `Target set to "${semantic.title}" by ${semantic.artist}.`,
-    };
+
+  // Two independent rankers over the live library:
+  //   - keyword: deterministic, nails exact artist/subject/tag tokens
+  //   - semantic: understands mood/technique ("a swirling emotional sky"), only
+  //     usable when RAG is wired; restricted to ids the renderer actually has.
+  const keywordIds = matchArtwork(query, ctx.library).map((m) => m.artwork.id);
+  const semanticIds = (ctx.retrieval ?? [])
+    .map((h) => h.id)
+    .filter((id) => inLibrary.has(id));
+
+  // Fuse when both fire (best of both signals); otherwise use whichever ranker
+  // produced anything — preserving the keyword-only behavior when RAG is off.
+  let chosenId: string | undefined;
+  if (semanticIds.length > 0 && keywordIds.length > 0) {
+    chosenId = fuseRankings([semanticIds, keywordIds])[0]?.id;
+  } else {
+    chosenId = semanticIds[0] ?? keywordIds[0];
   }
 
-  // No retriever (offline tests/eval) or no usable hit — fall back to the
-  // deterministic keyword matcher.
-  const matches = matchArtwork(query, ctx.library);
-  if (matches.length === 0) {
+  if (!chosenId) {
     return fail(`Nothing in the library matches "${query}". Try an artist or subject.`);
   }
-  const best = matches[0].artwork;
+  const best = ctx.library.find((a) => a.id === chosenId);
+  if (!best) {
+    return fail(`Nothing in the library matches "${query}". Try an artist or subject.`);
+  }
   return {
     ok: true,
     patch: { targetArtworkId: best.id },
@@ -260,10 +273,17 @@ function setFocalRegion(input: Record<string, unknown>): ToolResult {
 const SEARCH_RESULT_LIMIT = 3;
 
 function searchPaintings(ctx: ToolContext): ToolResult {
-  const hits = (ctx.retrieval ?? []).slice(0, SEARCH_RESULT_LIMIT);
+  // Apply the optional relevance floor before truncating, so a low-signal
+  // (off-topic) query yields nothing rather than weak, misleading grounding.
+  const floor = ctx.minScore;
+  const relevant =
+    floor === undefined
+      ? (ctx.retrieval ?? [])
+      : (ctx.retrieval ?? []).filter((h) => h.score >= floor);
+  const hits = relevant.slice(0, SEARCH_RESULT_LIMIT);
   if (hits.length === 0) {
-    // No retrieval wired, or nothing matched — let the model fall back to the
-    // library list in the system prompt rather than inventing facts.
+    // No retrieval wired, nothing matched, or nothing cleared the floor — let the
+    // model fall back to the library list in the prompt rather than invent facts.
     return fail("No painting matched that search. Try a different description.");
   }
   const body = hits

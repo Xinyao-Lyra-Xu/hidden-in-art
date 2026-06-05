@@ -51,6 +51,25 @@ test("set_target_painting prefers the semantic hit over keyword matching", () =>
   assert.equal(res.patch.targetArtworkId, "met-437984");
 });
 
+test("set_target_painting fuses keyword + semantic so an exact artist wins", () => {
+  // Semantic ranks Monet first and Rembrandt second; the keyword matcher nails
+  // "Rembrandt" (artist match). Fusion must surface Rembrandt over the semantic
+  // #1 — neither signal alone would pick it here.
+  const res = executeTool(
+    "set_target_painting",
+    { query: "Rembrandt" },
+    {
+      ...ctx(),
+      retrieval: [
+        { id: "met-436529", title: "La Grenouillère", artist: "Claude Monet", text: "water", score: 0.7 },
+        { id: "met-437394", title: "Aristotle with a Bust of Homer", artist: "Rembrandt", text: "baroque", score: 0.65 },
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.patch.targetArtworkId, "met-437394");
+});
+
 test("set_target_painting ignores a semantic hit outside the live library", () => {
   // The top hit isn't in FIXTURE_LIBRARY, so it must fall back to keyword match.
   const res = executeTool(
@@ -138,6 +157,73 @@ test("search_paintings fails gracefully when no retrieval is available", () => {
   const res = executeTool("search_paintings", { query: "anything" }, ctx());
   assert.equal(res.ok, false);
   assert.match(res.summary, /No painting matched/);
+});
+
+test("search_paintings drops hits below the relevance floor", () => {
+  const res = executeTool(
+    "search_paintings",
+    { query: "q" },
+    {
+      ...ctx(),
+      minScore: 0.5,
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field", artist: "Van Gogh", text: "swirl", score: 0.61 },
+        { id: "met-436528", title: "Irises", artist: "Van Gogh", text: "energy", score: 0.42 }, // below floor
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.match(res.summary, /Wheat Field/);
+  assert.doesNotMatch(res.summary, /Irises/); // filtered out
+});
+
+test("search_paintings reports nothing when every hit is below the floor", () => {
+  const res = executeTool(
+    "search_paintings",
+    { query: "quarterly tax spreadsheet" },
+    {
+      ...ctx(),
+      minScore: 0.5,
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field", artist: "Van Gogh", text: "swirl", score: 0.44 },
+      ],
+    },
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.summary, /No painting matched/);
+});
+
+test("search_paintings keeps all hits when no floor is set (default off)", () => {
+  const res = executeTool(
+    "search_paintings",
+    { query: "q" },
+    {
+      ...ctx(),
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field", artist: "Van Gogh", text: "swirl", score: 0.2 },
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.match(res.summary, /Wheat Field/);
+});
+
+test("set_target_painting ignores the relevance floor (always picks closest)", () => {
+  // Even a weak semantic hit below the floor is a valid style choice for
+  // selection — the floor must not gate set_target_painting.
+  const res = executeTool(
+    "set_target_painting",
+    { query: "something" },
+    {
+      ...ctx(),
+      minScore: 0.9,
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field with Cypresses", artist: "Van Gogh", text: "swirl", score: 0.3 },
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.patch.targetArtworkId, "met-437984");
 });
 
 test("search_paintings caps the number of results surfaced to the model", () => {
