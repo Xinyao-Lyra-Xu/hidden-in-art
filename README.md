@@ -139,7 +139,8 @@ application layer are tested with scripted responses — no key, no network.
 | `npm run eval` | Behavioral eval — **offline replay** of recorded cassettes |
 | `npm run eval:record` | Re-record cassettes against the real model (needs a key) |
 | `npm run embed` | Precompute the RAG corpus embeddings (needs a key) |
-| `npm run embed:check` | Verify the committed embeddings are in sync (needs a key) |
+| `npm run embed:check` | Verify the committed embeddings match the corpus (offline) |
+| `npm run embed:eval` | Re-record the retrieval-quality eval query vectors (needs a key) |
 
 `npm run eval -- --runs 3` replays multiple times; `npm run eval -- --record --force`
 re-records every case.

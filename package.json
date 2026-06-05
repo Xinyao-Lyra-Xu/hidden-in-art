@@ -13,6 +13,7 @@
     "eval:record": "node --import ./tests/register.mjs scripts/eval.ts --record",
     "embed": "node --import ./tests/register.mjs scripts/embed.ts",
     "embed:check": "node --import ./tests/register.mjs scripts/embed.ts --check",
+    "embed:eval": "node --import ./tests/register.mjs scripts/embedEvalQueries.ts",
     "import:met": "tsx scripts/importMetArtworks.ts",
     "build:paintings": "tsx scripts/buildPaintingLibrary.ts"
   },
