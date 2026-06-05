@@ -51,6 +51,25 @@ test("set_target_painting prefers the semantic hit over keyword matching", () =>
   assert.equal(res.patch.targetArtworkId, "met-437984");
 });
 
+test("set_target_painting fuses keyword + semantic so an exact artist wins", () => {
+  // Semantic ranks Monet first and Rembrandt second; the keyword matcher nails
+  // "Rembrandt" (artist match). Fusion must surface Rembrandt over the semantic
+  // #1 — neither signal alone would pick it here.
+  const res = executeTool(
+    "set_target_painting",
+    { query: "Rembrandt" },
+    {
+      ...ctx(),
+      retrieval: [
+        { id: "met-436529", title: "La Grenouillère", artist: "Claude Monet", text: "water", score: 0.7 },
+        { id: "met-437394", title: "Aristotle with a Bust of Homer", artist: "Rembrandt", text: "baroque", score: 0.65 },
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.patch.targetArtworkId, "met-437394");
+});
+
 test("set_target_painting ignores a semantic hit outside the live library", () => {
   // The top hit isn't in FIXTURE_LIBRARY, so it must fall back to keyword match.
   const res = executeTool(
