@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { embeddingsCompatible } from "@/infrastructure/llm/rag";
+import { embeddingsCompatible, ragMinScore } from "@/infrastructure/llm/rag";
 
 // embeddingsCompatible guards against silently comparing query vectors from one
 // model against corpus vectors built by another (or a different truncation),
@@ -41,4 +41,22 @@ test("incompatible when the configured dimension differs from the file", () => {
     ),
     false,
   );
+});
+
+// ── ragMinScore (search relevance floor, off by default) ─────────────────────
+
+test("ragMinScore is undefined when unset or blank", () => {
+  assert.equal(ragMinScore({}), undefined);
+  assert.equal(ragMinScore({ LLM_RAG_MIN_SCORE: "" }), undefined);
+  assert.equal(ragMinScore({ LLM_RAG_MIN_SCORE: "   " }), undefined);
+});
+
+test("ragMinScore parses a finite number", () => {
+  assert.equal(ragMinScore({ LLM_RAG_MIN_SCORE: "0.5" }), 0.5);
+  assert.equal(ragMinScore({ LLM_RAG_MIN_SCORE: "0" }), 0);
+});
+
+test("ragMinScore ignores non-numeric values", () => {
+  assert.equal(ragMinScore({ LLM_RAG_MIN_SCORE: "high" }), undefined);
+  assert.equal(ragMinScore({ LLM_RAG_MIN_SCORE: "NaN" }), undefined);
 });

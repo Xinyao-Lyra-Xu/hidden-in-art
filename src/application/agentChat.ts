@@ -57,6 +57,8 @@ export type ChatTurnInput = {
   // Optional semantic retriever (RAG). The route supplies a provider-backed one;
   // omitted in offline tests/eval, where selection falls back to keyword match.
   retrieve?: Retriever;
+  // Optional cosine floor for search_paintings (LLM_RAG_MIN_SCORE).
+  minScore?: number;
 };
 
 // Sanitize client-supplied conversation history into the text-only Message[] the
@@ -122,5 +124,6 @@ export async function runChatTurn(input: ChatTurnInput): Promise<AgentTurnResult
     onEvent: input.onEvent,
     history: sanitizeHistory(input.history),
     retrieve: input.retrieve,
+    minScore: input.minScore,
   });
 }

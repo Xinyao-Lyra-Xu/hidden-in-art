@@ -37,6 +37,18 @@ const VECTORS: VectorDoc[] = data.docs.map((d) => ({ id: d.id, vector: d.vector 
 export const ragModel = data.model;
 export const ragDocCount = data.docs.length;
 
+// Optional cosine floor for search_paintings, read from LLM_RAG_MIN_SCORE.
+// Off by default: the on-vs-off-topic score gap is narrow and model-specific,
+// so a baked-in default would be brittle. Operators who've measured their
+// model's distribution can opt in (≈0.5 suits gemini-embedding-001). Returns
+// undefined for unset/blank/non-finite values.
+export function ragMinScore(env: Record<string, string | undefined> = process.env): number | undefined {
+  const raw = env.LLM_RAG_MIN_SCORE;
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 // The committed vectors are only comparable to a query embedded by the SAME
 // model and dimensionality. A different model (or truncation) with the same dim
 // produces plausible-but-wrong cosine scores — a silent quality failure — so we

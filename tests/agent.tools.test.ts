@@ -159,6 +159,73 @@ test("search_paintings fails gracefully when no retrieval is available", () => {
   assert.match(res.summary, /No painting matched/);
 });
 
+test("search_paintings drops hits below the relevance floor", () => {
+  const res = executeTool(
+    "search_paintings",
+    { query: "q" },
+    {
+      ...ctx(),
+      minScore: 0.5,
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field", artist: "Van Gogh", text: "swirl", score: 0.61 },
+        { id: "met-436528", title: "Irises", artist: "Van Gogh", text: "energy", score: 0.42 }, // below floor
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.match(res.summary, /Wheat Field/);
+  assert.doesNotMatch(res.summary, /Irises/); // filtered out
+});
+
+test("search_paintings reports nothing when every hit is below the floor", () => {
+  const res = executeTool(
+    "search_paintings",
+    { query: "quarterly tax spreadsheet" },
+    {
+      ...ctx(),
+      minScore: 0.5,
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field", artist: "Van Gogh", text: "swirl", score: 0.44 },
+      ],
+    },
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.summary, /No painting matched/);
+});
+
+test("search_paintings keeps all hits when no floor is set (default off)", () => {
+  const res = executeTool(
+    "search_paintings",
+    { query: "q" },
+    {
+      ...ctx(),
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field", artist: "Van Gogh", text: "swirl", score: 0.2 },
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.match(res.summary, /Wheat Field/);
+});
+
+test("set_target_painting ignores the relevance floor (always picks closest)", () => {
+  // Even a weak semantic hit below the floor is a valid style choice for
+  // selection — the floor must not gate set_target_painting.
+  const res = executeTool(
+    "set_target_painting",
+    { query: "something" },
+    {
+      ...ctx(),
+      minScore: 0.9,
+      retrieval: [
+        { id: "met-437984", title: "Wheat Field with Cypresses", artist: "Van Gogh", text: "swirl", score: 0.3 },
+      ],
+    },
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.patch.targetArtworkId, "met-437984");
+});
+
 test("search_paintings caps the number of results surfaced to the model", () => {
   const many = Array.from({ length: 6 }, (_, i) => ({
     id: `id-${i}`,

@@ -33,6 +33,12 @@ export type ToolContext = {
   // *before* the tool runs (the embedding is async; tool execution stays sync).
   // Absent when RAG isn't wired or the tool takes no query.
   retrieval?: RetrievedDoc[];
+  // Optional cosine-similarity floor for search_paintings: hits below it are
+  // dropped so an off-topic question returns "nothing relevant" instead of
+  // grounding the model on weak matches. Undefined = no floor (default).
+  // Deliberately NOT applied to set_target_painting — selecting the closest
+  // style for any request is the desired behavior there.
+  minScore?: number;
 };
 
 export type ToolResult = {
@@ -267,10 +273,17 @@ function setFocalRegion(input: Record<string, unknown>): ToolResult {
 const SEARCH_RESULT_LIMIT = 3;
 
 function searchPaintings(ctx: ToolContext): ToolResult {
-  const hits = (ctx.retrieval ?? []).slice(0, SEARCH_RESULT_LIMIT);
+  // Apply the optional relevance floor before truncating, so a low-signal
+  // (off-topic) query yields nothing rather than weak, misleading grounding.
+  const floor = ctx.minScore;
+  const relevant =
+    floor === undefined
+      ? (ctx.retrieval ?? [])
+      : (ctx.retrieval ?? []).filter((h) => h.score >= floor);
+  const hits = relevant.slice(0, SEARCH_RESULT_LIMIT);
   if (hits.length === 0) {
-    // No retrieval wired, or nothing matched — let the model fall back to the
-    // library list in the system prompt rather than inventing facts.
+    // No retrieval wired, nothing matched, or nothing cleared the floor — let the
+    // model fall back to the library list in the prompt rather than invent facts.
     return fail("No painting matched that search. Try a different description.");
   }
   const body = hits

@@ -3,7 +3,7 @@ import { resolveLlmConfig, MissingLlmKeyError } from "@/infrastructure/llm/confi
 import { createOpenAiCompatCaller } from "@/infrastructure/llm/openaiCompatCaller";
 import { createOpenAiCompatStreamingCaller } from "@/infrastructure/llm/openaiCompatStreamingCaller";
 import { withRetry } from "@/infrastructure/llm/retry";
-import { createConfiguredRetriever } from "@/infrastructure/llm/rag";
+import { createConfiguredRetriever, ragMinScore } from "@/infrastructure/llm/rag";
 import { createLogger, newRequestId } from "@/infrastructure/observability/logger";
 import {
   rateLimiter,
@@ -134,6 +134,7 @@ async function handleTurn(
       history: body.history,
       callLlm,
       retrieve,
+      minScore: ragMinScore(),
       maxTokens: turnTokenBudget(),
       onEvent: (event) => log.debug("agent event", { ...event }),
     });
@@ -261,6 +262,7 @@ async function handleTurnStream(
           history: body.history,
           callLlm,
           retrieve,
+          minScore: ragMinScore(),
           maxTokens: turnTokenBudget(),
           onEvent: (event) => {
             if (event.type === "text_delta") send("delta", { text: event.delta });

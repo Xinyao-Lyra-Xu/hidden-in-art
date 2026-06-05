@@ -164,8 +164,10 @@ export async function runAgentTurn(args: {
   // the domain stays network-free; absent = the keyword matcher handles
   // selection and search_paintings reports nothing found.
   retrieve?: Retriever;
+  // Optional cosine floor for search_paintings (see ToolContext.minScore).
+  minScore?: number;
 }): Promise<AgentTurnResult> {
-  const { userMessage, callLlm, library, retrieve } = args;
+  const { userMessage, callLlm, library, retrieve, minScore } = args;
   const maxSteps = args.maxSteps ?? DEFAULT_MAX_STEPS;
   const maxTokens = args.maxTokens;
   const emit = args.onEvent ?? (() => {});
@@ -235,7 +237,7 @@ export async function runAgentTurn(args: {
           }
         }
       }
-      const result = executeTool(use.name, use.input, { settings, library, retrieval });
+      const result = executeTool(use.name, use.input, { settings, library, retrieval, minScore });
       if (result.ok) settings = { ...settings, ...result.patch };
       emit({
         type: "tool_call",
