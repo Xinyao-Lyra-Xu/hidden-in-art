@@ -240,3 +240,26 @@ test("buildSystemPrompt reflects the live settings and library", () => {
   assert.match(prompt, /colorMatch=dither/);
   assert.match(prompt, /Monet/);
 });
+
+test("buildSystemPrompt has no grounding block when no target is set", () => {
+  const prompt = buildSystemPrompt(DEFAULT_SETTINGS, FIXTURE_LIBRARY);
+  assert.doesNotMatch(prompt, /Current painting —/);
+});
+
+test("buildSystemPrompt grounds the active painting's notes once a target is set", () => {
+  const prompt = buildSystemPrompt(
+    { ...DEFAULT_SETTINGS, targetArtworkId: "met-437984" }, // Wheat Field with Cypresses
+    FIXTURE_LIBRARY,
+  );
+  assert.match(prompt, /Current painting — "Wheat Field with Cypresses" by Vincent van Gogh/);
+  assert.match(prompt, /Saint-Rémy/); // from the curated description
+  assert.match(prompt, /Brushwork:/); // stroke notes folded in
+});
+
+test("buildSystemPrompt skips grounding for a target absent from the library", () => {
+  const prompt = buildSystemPrompt(
+    { ...DEFAULT_SETTINGS, targetArtworkId: "not-in-library" },
+    FIXTURE_LIBRARY,
+  );
+  assert.doesNotMatch(prompt, /Current painting —/);
+});
