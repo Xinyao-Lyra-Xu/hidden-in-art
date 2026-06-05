@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { sendAgentTurn } from "@/lib/agentApi";
+import { streamAgentTurn } from "@/lib/agentApi";
 import type { AgentArtwork, AgentSettings } from "@/domain/agent/types";
 
 type ChatMessage = {
@@ -35,6 +35,16 @@ export default function AgentChat({ settings, library, onApply, disabled }: Prop
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, busy]);
 
+  // Update the trailing assistant bubble (the one we stream into).
+  function updateAssistant(fn: (m: ChatMessage) => ChatMessage) {
+    setMessages((prev) => {
+      const next = prev.slice();
+      const last = next[next.length - 1];
+      if (last && last.role === "assistant") next[next.length - 1] = fn(last);
+      return next;
+    });
+  }
+
   async function send(text: string) {
     const message = text.trim();
     if (!message || busy || disabled) return;
@@ -44,22 +54,40 @@ export default function AgentChat({ settings, library, onApply, disabled }: Prop
 
     setInput("");
     setError(null);
-    setMessages((prev) => [...prev, { role: "user", text: message }]);
+    // Append the user turn plus an empty assistant bubble to stream into.
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", text: message },
+      { role: "assistant", text: "", tools: [] },
+    ]);
     setBusy(true);
 
     try {
-      const res = await sendAgentTurn({ message, settings, library, history });
+      const res = await streamAgentTurn({
+        message,
+        settings,
+        library,
+        history,
+        onDelta: (chunk) => updateAssistant((m) => ({ ...m, text: m.text + chunk })),
+        onTool: (tool) =>
+          updateAssistant((m) => ({ ...m, tools: [...(m.tools ?? []), tool] })),
+      });
       onApply(res.settings);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: res.reply || "Done.",
-          tools: res.toolCalls.map((t) => ({ name: t.name, ok: t.ok })),
-        },
-      ]);
+      // Reconcile the chips with the authoritative final tool list and guarantee
+      // a non-empty reply.
+      updateAssistant((m) => ({
+        ...m,
+        text: m.text || "Done.",
+        tools: res.toolCalls.map((t) => ({ name: t.name, ok: t.ok })),
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong.");
+      // Drop the placeholder bubble if nothing streamed into it.
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && last.role === "assistant" && last.text === "") return prev.slice(0, -1);
+        return prev;
+      });
     } finally {
       setBusy(false);
     }
@@ -92,7 +120,15 @@ export default function AgentChat({ settings, library, onApply, disabled }: Prop
                     : "bg-white text-neutral-800 ring-1 ring-neutral-200"
                 }`}
               >
-                <p>{m.text}</p>
+                {m.role === "assistant" && m.text === "" ? (
+                  <span className="inline-flex gap-1" aria-label="Adjusting">
+                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-neutral-400 [animation-delay:-0.3s]" />
+                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-neutral-400 [animation-delay:-0.15s]" />
+                    <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-neutral-400" />
+                  </span>
+                ) : (
+                  <p>{m.text}</p>
+                )}
                 {m.tools && m.tools.length > 0 && (
                   <p className="mt-1 text-[10px] uppercase tracking-wide text-neutral-400">
                     {m.tools.map((t) => `${t.ok ? "✓" : "✕"} ${t.name}`).join(" · ")}
@@ -101,13 +137,6 @@ export default function AgentChat({ settings, library, onApply, disabled }: Prop
               </div>
             </div>
           ))}
-          {busy && (
-            <div className="flex justify-start">
-              <div className="rounded bg-white px-3 py-2 text-sm text-neutral-400 ring-1 ring-neutral-200">
-                Adjusting…
-              </div>
-            </div>
-          )}
         </div>
       )}
 

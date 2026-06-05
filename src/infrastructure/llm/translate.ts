@@ -40,6 +40,8 @@ export type OpenAiRequestBody = {
   tool_choice?: "auto";
   max_tokens?: number;
   temperature?: number;
+  stream?: boolean;
+  stream_options?: { include_usage: boolean };
 };
 
 export type OpenAiResponseBody = {
@@ -58,7 +60,7 @@ export type OpenAiResponseBody = {
   };
 };
 
-function toTokenUsage(usage: OpenAiResponseBody["usage"]): TokenUsage | undefined {
+export function toTokenUsage(usage: OpenAiResponseBody["usage"]): TokenUsage | undefined {
   if (!usage) return undefined;
   return {
     promptTokens: usage.prompt_tokens ?? 0,
@@ -139,14 +141,21 @@ function parseArguments(raw: string): Record<string, unknown> {
   }
 }
 
-export function fromOpenAiResponse(body: OpenAiResponseBody): LlmResponse {
-  const message = body.choices?.[0]?.message;
-  const toolCalls = message?.tool_calls ?? [];
-  const usage = toTokenUsage(body.usage);
+// Build the agent's LlmResponse from the pieces both transports produce: the
+// assistant text, the tool calls (with stringified `arguments`), and usage.
+// The non-streaming path passes these straight from the response body; the
+// streaming path reassembles them from deltas first. Keeping the mapping here
+// guarantees both transports yield identical block shapes.
+export function assembleLlmResponse(parts: {
+  text: string;
+  toolCalls: OpenAiToolCall[];
+  usage?: TokenUsage;
+}): LlmResponse {
+  const { text, toolCalls, usage } = parts;
 
   if (toolCalls.length > 0) {
     const content: ContentBlock[] = [];
-    if (message?.content) content.push({ type: "text", text: message.content });
+    if (text) content.push({ type: "text", text });
     for (const call of toolCalls) {
       content.push({
         type: "tool_use",
@@ -160,7 +169,16 @@ export function fromOpenAiResponse(body: OpenAiResponseBody): LlmResponse {
 
   return {
     stop_reason: "end_turn",
-    content: [{ type: "text", text: message?.content ?? "" }],
+    content: [{ type: "text", text }],
     usage,
   };
+}
+
+export function fromOpenAiResponse(body: OpenAiResponseBody): LlmResponse {
+  const message = body.choices?.[0]?.message;
+  return assembleLlmResponse({
+    text: message?.content ?? "",
+    toolCalls: message?.tool_calls ?? [],
+    usage: toTokenUsage(body.usage),
+  });
 }

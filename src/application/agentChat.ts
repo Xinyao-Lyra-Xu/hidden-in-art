@@ -13,6 +13,7 @@ import {
   type LlmCaller,
   type Message,
 } from "@/domain/agent/runner";
+import type { Retriever } from "@/domain/agent/retriever";
 import { DEFAULT_SETTINGS, type AgentArtwork, type AgentSettings } from "@/domain/agent/types";
 
 export const MAX_MESSAGE_LENGTH = 2000;
@@ -53,6 +54,9 @@ export type ChatTurnInput = {
   onEvent?: (event: AgentEvent) => void;
   // Prior conversation turns from the client. Untrusted: sanitized below.
   history?: unknown;
+  // Optional semantic retriever (RAG). The route supplies a provider-backed one;
+  // omitted in offline tests/eval, where selection falls back to keyword match.
+  retrieve?: Retriever;
 };
 
 // Sanitize client-supplied conversation history into the text-only Message[] the
@@ -117,5 +121,6 @@ export async function runChatTurn(input: ChatTurnInput): Promise<AgentTurnResult
     maxTokens: input.maxTokens,
     onEvent: input.onEvent,
     history: sanitizeHistory(input.history),
+    retrieve: input.retrieve,
   });
 }

@@ -53,18 +53,24 @@ export function backoffDelayMs(
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export function withRetry(caller: LlmCaller, options: RetryOptions = {}): LlmCaller {
+// Wrap any async function with the same backoff policy. withRetry is the
+// LlmCaller-shaped specialization; the embedder (and any other transient
+// provider call) reuses this generic form so the retry logic lives in one place.
+export function withRetryFn<A extends unknown[], R>(
+  fn: (...args: A) => Promise<R>,
+  options: RetryOptions = {},
+): (...args: A) => Promise<R> {
   const maxAttempts = options.maxAttempts ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
   const maxDelayMs = options.maxDelayMs ?? 8000;
   const sleep = options.sleep ?? defaultSleep;
   const random = options.random ?? Math.random;
 
-  return async (args) => {
+  return async (...args: A): Promise<R> => {
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        return await caller(args);
+        return await fn(...args);
       } catch (err) {
         lastError = err;
         const isLast = attempt >= maxAttempts;
@@ -84,4 +90,8 @@ export function withRetry(caller: LlmCaller, options: RetryOptions = {}): LlmCal
     // Unreachable: the loop either returns or throws, but satisfy the compiler.
     throw lastError;
   };
+}
+
+export function withRetry(caller: LlmCaller, options: RetryOptions = {}): LlmCaller {
+  return withRetryFn(caller, options);
 }
